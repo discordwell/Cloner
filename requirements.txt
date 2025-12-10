@@ -10,6 +10,7 @@ playwright>=1.41.0
 pydub>=0.25.1
 soundfile>=0.12.1
 librosa>=0.10.1
+pyaudio>=0.2.14
 
 # Voice Cloning - Will use API-based solutions (ElevenLabs, Resemble.ai)
 # or alternative libraries compatible with Python 3.12
