@@ -30,6 +30,10 @@ torchaudio>=2.2.0
 mediapipe>=0.10.13
 insightface>=0.7.3
 
+# LLM Integration
+anthropic>=0.40.0
+openai>=1.0.0
+
 # Utilities
 numpy>=1.24.0
 scipy>=1.10.0
