@@ -120,27 +120,8 @@ class RealtimeVisemeCompositor:
 
     def _detect_mouth_position(self, frame: np.ndarray) -> Optional[Tuple[int, int]]:
         """Detect mouth center position in frame."""
-        try:
-            import mediapipe as mp
-            face_mesh = mp.solutions.face_mesh.FaceMesh(
-                static_image_mode=True,
-                max_num_faces=1
-            )
-
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = face_mesh.process(rgb)
-
-            if results.multi_face_landmarks:
-                landmarks = results.multi_face_landmarks[0]
-                h, w = frame.shape[:2]
-
-                # Mouth center landmark
-                mouth_center = landmarks.landmark[13]  # Upper lip center
-                return (int(mouth_center.x * w), int(mouth_center.y * h))
-
-        except ImportError:
-            pass
-
+        # Use stored position from library instead of runtime detection
+        # This is faster and avoids MediaPipe API issues
         return None
 
     def _blend_mouth(
