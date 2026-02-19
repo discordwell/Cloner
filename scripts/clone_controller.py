@@ -140,6 +140,12 @@ class CloneAgent:
         # System prompt for the clone
         self.system_prompt = self._build_system_prompt()
 
+        # Lip-sync compositing (lazy-loaded on first use)
+        self._viseme_compositor = None
+        self._viseme_tts = None
+        self._viseme_base_frame = None
+        self._lipsync_available = None  # None = not yet checked
+
         self._log("CloneAgent initialized")
 
     def _log(self, msg):
@@ -305,8 +311,170 @@ Slopify is an AI image/video automation platform demonstrating sophisticated eng
         finally:
             self.is_speaking = False
 
+    def _init_lipsync(self):
+        """Lazy-initialize the viseme lip-sync system. Returns True if available."""
+        if self._lipsync_available is not None:
+            return self._lipsync_available
+
+        try:
+            from src.viseme.viseme_library import VisemeLibrary
+            from src.viseme.enhanced_compositor import EnhancedVisemeCompositor, EnhancedCompositorConfig
+            from src.viseme.tts_viseme import TTSWithVisemes
+
+            # Find best viseme library (prefer enhanced)
+            # Derive from project root, not VIDEO_DIR (which differs on Windows)
+            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            viseme_base = os.path.join(project_root, "data", "visemes")
+            lib_path = None
+            for candidate in ["user_lit_enhanced", "user_lit", "user_speaking", "user_test"]:
+                path = os.path.join(viseme_base, candidate)
+                if os.path.exists(os.path.join(path, "metadata.json")):
+                    lib_path = path
+                    break
+
+            if not lib_path:
+                self._log("No viseme library found, lip-sync disabled")
+                self._lipsync_available = False
+                return False
+
+            # Load library
+            library = VisemeLibrary.load(lib_path)
+            self._log(f"Loaded viseme library: {lib_path} ({len(library.templates)} visemes)")
+
+            if library.neutral_frame is None:
+                self._log("No neutral frame in library, lip-sync disabled")
+                self._lipsync_available = False
+                return False
+
+            self._viseme_base_frame = library.neutral_frame
+
+            # Initialize compositor
+            config = EnhancedCompositorConfig(fps=24)  # 24fps is enough, faster render
+            self._viseme_compositor = EnhancedVisemeCompositor(library, config)
+
+            # Initialize TTS with viseme timestamps
+            self._viseme_tts = TTSWithVisemes(
+                api_key=ELEVENLABS_API_KEY,
+                use_phonemizer=False,
+            )
+
+            self._lipsync_available = True
+            self._log("Lip-sync system initialized")
+            return True
+
+        except Exception as e:
+            self._log(f"Lip-sync init failed: {e}")
+            import traceback
+            traceback.print_exc()
+            self._lipsync_available = False
+            return False
+
     def _speak_via_obs(self, text):
-        """Generate TTS and play through OBS media source."""
+        """Generate TTS and play through OBS — with lip-sync if available."""
+        # Try lip-synced video first
+        if self._init_lipsync():
+            try:
+                self._speak_with_lipsync(text)
+                return
+            except Exception as e:
+                self._log(f"Lip-sync failed, falling back to audio-only: {e}")
+                import traceback
+                traceback.print_exc()
+
+        # Fallback: audio-only through OBS
+        self._speak_audio_only(text)
+
+    def _speak_with_lipsync(self, text):
+        """Generate lip-synced video and play through OBS."""
+        import obsws_python as obs
+
+        idle_video_path = os.path.join(VIDEO_DIR, "idle_loop.mp4")
+
+        # 1. Generate TTS with viseme timestamps
+        self._log("Generating TTS with viseme timestamps...")
+        audio_path = os.path.join(TTS_AUDIO_DIR, f"tts_{int(time.time())}.mp3")
+        tts_result = self._viseme_tts.generate_with_visemes(
+            text=text,
+            voice_id=DEFAULT_VOICE_ID,
+            output_path=audio_path,
+            model_id="eleven_monolingual_v1",
+            stability=0.5,
+            similarity_boost=0.75,
+        )
+        self._log(f"TTS: {tts_result.audio_duration_ms}ms, {len(tts_result.viseme_events)} visemes")
+
+        # 2. Render lip-synced video
+        self._log("Rendering lip-sync video...")
+        render_start = time.time()
+        composed_path = os.path.join(TTS_AUDIO_DIR, f"lipsync_{int(time.time())}.mp4")
+        self._viseme_compositor.render_to_video(
+            base_frame=self._viseme_base_frame,
+            tts_result=tts_result,
+            output_path=composed_path,
+            include_audio=True,
+        )
+        render_time = time.time() - render_start
+        self._log(f"Rendered in {render_time:.1f}s: {composed_path}")
+
+        # 3. Play composed video through OBS (swap IdleVideo source temporarily)
+        duration_s = tts_result.audio_duration_ms / 1000.0
+        cl = None
+
+        try:
+            cl = obs.ReqClient(host=OBS_HOST, port=OBS_PORT, password=OBS_PASSWORD)
+
+            # Swap IdleVideo to the composed clip
+            cl.set_input_settings(
+                name="IdleVideo",
+                settings={
+                    "local_file": composed_path,
+                    "looping": False,
+                    "restart_on_activate": True,
+                    "clear_on_media_end": False,
+                },
+                overlay=True,
+            )
+            cl.trigger_media_input_action(
+                "IdleVideo",
+                "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART",
+            )
+            self._log(f"Playing lip-synced video ({duration_s:.1f}s)")
+
+            # Wait for playback to finish
+            time.sleep(duration_s + 0.5)
+
+        except Exception as e:
+            self._log(f"OBS lip-sync playback error: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            # Always restore idle loop, even if playback was interrupted
+            try:
+                if cl is None:
+                    cl = obs.ReqClient(host=OBS_HOST, port=OBS_PORT, password=OBS_PASSWORD)
+                cl.set_input_settings(
+                    name="IdleVideo",
+                    settings={
+                        "local_file": idle_video_path,
+                        "looping": True,
+                        "restart_on_activate": True,
+                        "clear_on_media_end": False,
+                    },
+                    overlay=True,
+                )
+                cl.trigger_media_input_action(
+                    "IdleVideo",
+                    "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART",
+                )
+                self._log("Switched back to idle loop")
+            except Exception as e2:
+                self._log(f"Failed to restore idle loop: {e2}")
+
+        # Cleanup old files
+        self._cleanup_old_tts()
+
+    def _speak_audio_only(self, text):
+        """Fallback: generate TTS audio and play through OBS audio source."""
         import requests
         import obsws_python as obs
 
@@ -327,7 +495,7 @@ Slopify is an AI image/video automation platform demonstrating sophisticated eng
             }
         }
 
-        self._log("Generating TTS...")
+        self._log("Generating TTS (audio-only fallback)...")
         response = requests.post(url, headers=headers, json=data, stream=True)
 
         if response.status_code != 200:
@@ -357,30 +525,27 @@ Slopify is an AI image/video automation platform demonstrating sophisticated eng
             source_exists = "CloneTTS" in input_names
 
             if source_exists:
-                # Update existing source (positional: name, settings, overlay)
                 cl.set_input_settings("CloneTTS", {"local_file": windows_path}, True)
             else:
-                # Create in IdleLoop scene (where clone is active)
                 self._log("Creating CloneTTS source...")
                 cl.create_input(
-                    "IdleLoop",  # sceneName
-                    "CloneTTS",  # inputName
-                    "ffmpeg_source",  # inputKind
-                    {  # inputSettings
+                    "IdleLoop",
+                    "CloneTTS",
+                    "ffmpeg_source",
+                    {
                         "local_file": windows_path,
                         "looping": False,
                         "restart_on_activate": True,
                     },
-                    True,  # sceneItemEnabled
+                    True,
                 )
 
-            # Trigger playback (positional: name, action)
             cl.trigger_media_input_action(
                 "CloneTTS",
                 "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART"
             )
 
-            self._log("Playing through OBS")
+            self._log("Playing audio through OBS")
 
             # Estimate duration and wait
             duration = len(text) * 0.08 + 0.5
@@ -395,10 +560,11 @@ Slopify is an AI image/video automation platform demonstrating sophisticated eng
         self._cleanup_old_tts()
 
     def _cleanup_old_tts(self, keep_last=5):
-        """Remove old TTS files."""
+        """Remove old TTS and lip-sync files."""
         try:
             files = sorted(
-                [f for f in os.listdir(TTS_AUDIO_DIR) if f.startswith("tts_")],
+                [f for f in os.listdir(TTS_AUDIO_DIR)
+                 if f.startswith("tts_") or f.startswith("lipsync_")],
                 key=lambda x: os.path.getmtime(os.path.join(TTS_AUDIO_DIR, x))
             )
             for f in files[:-keep_last]:
