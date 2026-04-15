@@ -44,9 +44,16 @@ User Input (text/question)
 - **Kling Client** (`src/video/kling_client.py`) — FAL API for Kling models
 - **Video Backend Factory** (`src/video/video_backend.py`) — factory for all backends
 
-### Orchestration
-- **Clone Pipeline** (`src/clone_pipeline.py`) — end-to-end: text -> talking video
-- **Realtime Clone** (`src/realtime_clone.py`) — real-time response system
+### Streaming Pipeline (`src/streaming/`)
+- **StreamingPipeline** (`pipeline.py`) — orchestrator: question -> video frames in ~2.7s
+- **SentenceSplitter** (`sentence_splitter.py`) — splits LLM token stream on sentence boundaries
+- **LLMStreamer** (`llm_streamer.py`) — streaming Anthropic/OpenAI with sentence splitting
+- **TTSStreamer** (`tts_streamer.py`) — ElevenLabs streaming TTS per sentence
+- **AtlasRealtimeSession** (`atlas_realtime.py`) — LiveKit WebRTC session for real-time lip-sync
+
+### Orchestration (legacy)
+- **Clone Pipeline** (`src/clone_pipeline.py`) — offline: text -> talking video (Atlas or viseme)
+- **Realtime Clone** (`src/realtime_clone.py`) — real-time response system (offline Atlas)
 - **Clone Interview** (`src/clone_interview.py`) — meeting capture + auto-response
 - **Clone Controller** (`scripts/clone_controller.py`) — tkinter GUI + OBS control
 
@@ -57,7 +64,21 @@ User Input (text/question)
 
 ## Data Flow: Text -> Talking Video
 
-### Atlas Path (default)
+### Streaming Pipeline (default, ~2.7s to first frame)
+```
+User speaks -> Whisper transcription (~1s)
+  -> LLM streaming tokens (~500ms TTFB)
+  -> SentenceSplitter (accumulate until sentence boundary)
+  -> ElevenLabs TTS per sentence (~500ms TTFB)
+  -> Publish audio to Atlas Realtime WebRTC session
+  -> Receive lip-synced video frames (~100ms)
+  -> Display / OBS
+```
+
+Thread architecture: 4 parallel workers connected by queues:
+- LLM Streamer -> tts_queue -> TTS Worker -> audio_queue -> Audio Publisher -> LiveKit -> Video Frames
+
+### Atlas Offline Path (fallback)
 ```
 1. Text -> ElevenLabs TTS -> audio.mp3
 2. audio.mp3 + face.png -> Atlas API -> lip-synced.mp4

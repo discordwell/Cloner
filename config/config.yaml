@@ -111,6 +111,22 @@ lipsync_backend:
     api_key: "${ATLAS_API_KEY}"
     poll_interval: 2.0   # seconds between poll requests
     timeout: 300.0       # max seconds to wait for job
+    realtime:
+      enabled: true
+      max_session_duration: 3600  # seconds (1hr max)
+      reconnect_attempts: 3
+
+# Streaming pipeline (LLM -> sentence split -> TTS -> Atlas Realtime -> video)
+streaming:
+  enabled: true
+  llm:
+    provider: openai
+    model: gpt-5.4
+    max_tokens: 300
+    temperature: 0.8
+  sentence_splitter:
+    min_length: 10
+    max_buffer: 500
 
 tts:
   voice_id: nf18MnSL81anCHgQgL1A
