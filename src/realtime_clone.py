@@ -30,6 +30,7 @@ class CloneSession:
     viseme_library_path: str
     voice_id: Optional[str] = None  # ElevenLabs voice ID
     use_local_tts: bool = True  # Use macOS 'say' if no voice_id
+    reference_image_path: Optional[str] = None  # Face image for Atlas lip-sync
 
 
 class RealtimeCloneSystem:
@@ -39,10 +40,10 @@ class RealtimeCloneSystem:
     Usage:
         system = RealtimeCloneSystem()
 
-        # Setup phase (~10s)
+        # Setup phase (~10s with viseme, instant with atlas)
         session = system.setup_from_video("path/to/video.mp4", "subject_name")
 
-        # Response phase (~4-6s per response)
+        # Response phase
         system.respond("Hello, how are you?", play_immediately=True)
     """
 
@@ -51,17 +52,23 @@ class RealtimeCloneSystem:
         elevenlabs_api_key: Optional[str] = None,
         anthropic_api_key: Optional[str] = None,
         openai_api_key: Optional[str] = None,
-        data_dir: str = "data"
+        atlas_api_key: Optional[str] = None,
+        data_dir: str = "data",
+        lipsync_backend: str = "atlas",
     ):
         self.elevenlabs_key = elevenlabs_api_key or os.getenv("ELEVENLABS_API_KEY")
         self.anthropic_key = anthropic_api_key or os.getenv("ANTHROPIC_API_KEY")
         self.openai_key = openai_api_key or os.getenv("OPENAI_API_KEY")
+        self.atlas_key = atlas_api_key or os.getenv("ATLAS_API_KEY")
         self.data_dir = Path(data_dir)
+        self.lipsync_backend = lipsync_backend
 
         self.session: Optional[CloneSession] = None
         self._library = None
         self._compositor = None
         self._tts = None
+        self._atlas_client = None
+        self._elevenlabs_client = None
 
         # Response queue for async generation
         self._response_queue = []
@@ -121,16 +128,21 @@ class RealtimeCloneSystem:
             logger.info("Cloning voice...")
             voice_id = self._clone_voice_from_video(video_path, subject_id)
 
+        # Extract a reference frame for Atlas lip-sync
+        reference_image = self._extract_reference_frame(video_path, subject_id)
+
         # Create session
         self.session = CloneSession(
             subject_id=subject_id,
             viseme_library_path=str(library_path),
             voice_id=voice_id,
-            use_local_tts=(voice_id is None)
+            use_local_tts=(voice_id is None),
+            reference_image_path=reference_image,
         )
 
-        # Pre-load resources
-        self._load_session_resources()
+        # Pre-load resources (only needed for viseme path)
+        if self.lipsync_backend == "viseme":
+            self._load_session_resources()
 
         total_time = time.time() - start_time
         logger.info(f"Setup complete in {total_time:.1f}s")
@@ -193,7 +205,8 @@ class RealtimeCloneSystem:
         text: str,
         play_immediately: bool = True,
         output_path: Optional[str] = None,
-        on_complete: Optional[Callable[[str], None]] = None
+        on_complete: Optional[Callable[[str], None]] = None,
+        lipsync_backend: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Generate and play a response.
@@ -203,6 +216,7 @@ class RealtimeCloneSystem:
             play_immediately: Play video when ready
             output_path: Custom output path (default: temp file)
             on_complete: Callback when video is ready
+            lipsync_backend: Override lip-sync backend ("atlas" or "viseme")
 
         Returns:
             Dict with timing info and output path
@@ -210,14 +224,120 @@ class RealtimeCloneSystem:
         if not self.session:
             raise RuntimeError("No active session. Call setup_from_video first.")
 
-        result = {"text": text, "timings": {}}
+        backend = lipsync_backend or self.lipsync_backend
+
+        if backend == "atlas":
+            return self._respond_atlas(text, play_immediately, output_path, on_complete)
+        else:
+            return self._respond_viseme(text, play_immediately, output_path, on_complete)
+
+    def _respond_atlas(
+        self,
+        text: str,
+        play_immediately: bool,
+        output_path: Optional[str],
+        on_complete: Optional[Callable[[str], None]],
+    ) -> Dict[str, Any]:
+        """Generate response using Atlas lip-sync API."""
+        result = {"text": text, "lipsync_backend": "atlas", "timings": {}}
+        start_time = time.time()
+
+        # 1. Generate TTS audio
+        logger.info("Generating TTS audio...")
+        tts_start = time.time()
+
+        audio_tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+        audio_path = audio_tmp.name
+        audio_tmp.close()
+
+        if self.session.use_local_tts:
+            # Local TTS fallback (macOS 'say')
+            from src.viseme.local_tts import LocalTTS
+            local_tts = LocalTTS()
+            local_tts.generate(text, audio_path)
+        else:
+            if not self._elevenlabs_client:
+                from src.voice.elevenlabs_client import ElevenLabsClient
+                self._elevenlabs_client = ElevenLabsClient(api_key=self.elevenlabs_key)
+            self._elevenlabs_client.generate_speech(
+                text=text,
+                voice_id=self.session.voice_id,
+                output_path=audio_path,
+            )
+
+        result["audio_path"] = audio_path
+        result["timings"]["tts"] = time.time() - tts_start
+
+        # 2. Get face image
+        image_path = self.session.reference_image_path
+        if not image_path or not Path(image_path).exists():
+            raise RuntimeError(
+                "No reference face image for Atlas. "
+                "Set session.reference_image_path to a face photo."
+            )
+
+        # 3. Generate lip-sync video via Atlas
+        logger.info("Generating lip-sync video via Atlas...")
+        atlas_start = time.time()
+
+        if not self._atlas_client:
+            from src.video.atlas_client import AtlasClient
+            self._atlas_client = AtlasClient(api_key=self.atlas_key)
+
+        if output_path:
+            video_path = output_path
+        else:
+            video_tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+            video_path = video_tmp.name
+            video_tmp.close()
+
+        video_path = self._atlas_client.generate_lipsync(
+            audio_path=audio_path,
+            image_path=image_path,
+            output_path=video_path,
+        )
+
+        # Clean up temp audio file
+        try:
+            os.unlink(audio_path)
+        except OSError:
+            pass
+
+        result["video_path"] = video_path
+        result["timings"]["atlas"] = time.time() - atlas_start
+        result["timings"]["total"] = time.time() - start_time
+
+        logger.info(f"Response generated in {result['timings']['total']:.2f}s")
+
+        if play_immediately:
+            self.play_video(video_path)
+        if on_complete:
+            on_complete(video_path)
+
+        return result
+
+    def _respond_viseme(
+        self,
+        text: str,
+        play_immediately: bool,
+        output_path: Optional[str],
+        on_complete: Optional[Callable[[str], None]],
+    ) -> Dict[str, Any]:
+        """Generate response using legacy viseme compositing."""
+        result = {"text": text, "lipsync_backend": "viseme", "timings": {}}
         start_time = time.time()
 
         # 1. Generate TTS with visemes
         logger.info("Generating TTS...")
         tts_start = time.time()
 
-        audio_path = output_path or tempfile.mktemp(suffix='.wav')
+        if output_path:
+            audio_path = output_path
+        else:
+            audio_tmp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+            audio_path = audio_tmp.name
+            audio_tmp.close()
+
         if self.session.use_local_tts:
             tts_result = self._tts.generate_with_visemes(text, audio_path)
         else:
@@ -232,7 +352,13 @@ class RealtimeCloneSystem:
         logger.info("Compositing video...")
         comp_start = time.time()
 
-        video_path = output_path or tempfile.mktemp(suffix='.mp4')
+        if output_path:
+            video_path = output_path
+        else:
+            video_tmp = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False)
+            video_path = video_tmp.name
+            video_tmp.close()
+
         video_path = self._compositor.render_to_video(
             base_frame=self._library.neutral_frame,
             tts_result=tts_result,
@@ -246,11 +372,8 @@ class RealtimeCloneSystem:
 
         logger.info(f"Response generated in {result['timings']['total']:.2f}s")
 
-        # 3. Play if requested
         if play_immediately:
             self.play_video(video_path)
-
-        # 4. Callback if provided
         if on_complete:
             on_complete(video_path)
 
@@ -374,6 +497,33 @@ class RealtimeCloneSystem:
                 cv2.imwrite(str(dst_dir / item.name), enhance(img))
             elif item.suffix == '.json':
                 shutil.copy(item, dst_dir / item.name)
+
+    def _extract_reference_frame(self, video_path: Path, subject_id: str) -> Optional[str]:
+        """Extract a single reference frame from video for Atlas lip-sync."""
+        try:
+            ref_dir = self.data_dir / "reference_frames"
+            ref_dir.mkdir(parents=True, exist_ok=True)
+            ref_path = ref_dir / f"{subject_id}.png"
+
+            # Extract frame at 1 second mark
+            cmd = [
+                'ffmpeg', '-y',
+                '-i', str(video_path),
+                '-ss', '1',
+                '-vframes', '1',
+                str(ref_path),
+            ]
+            result = subprocess.run(cmd, capture_output=True, timeout=30)
+
+            if result.returncode == 0 and ref_path.exists():
+                logger.info(f"Reference frame extracted: {ref_path}")
+                return str(ref_path)
+            else:
+                logger.warning(f"Failed to extract reference frame: {result.stderr.decode()}")
+                return None
+        except Exception as e:
+            logger.warning(f"Reference frame extraction failed: {e}")
+            return None
 
     def _clone_voice_from_video(self, video_path: Path, subject_id: str) -> Optional[str]:
         """Extract audio and clone voice."""

@@ -1,8 +1,11 @@
 """
 Integrated clone pipeline.
 
-Combines voice cloning, viseme-based lip sync, and video compositing
-into a unified pipeline for creating talking head videos.
+Combines voice cloning with lip-sync video generation to create talking head videos.
+
+Two lip-sync paths:
+  - Atlas (default): ElevenLabs TTS audio + face image -> Atlas API -> MP4
+  - Viseme (legacy): ElevenLabs TTS with viseme timing -> local compositing -> MP4
 """
 
 import os
@@ -24,48 +27,66 @@ class CloneProfile:
     reference_frame_path: Optional[str] = None
     created_at: float = 0.0
 
-    def is_complete(self) -> bool:
-        """Check if profile has all required components."""
-        return all([
-            self.voice_id,
-            self.viseme_library_path,
-            Path(self.viseme_library_path).exists() if self.viseme_library_path else False
-        ])
+    def is_complete(self, lipsync_backend: str = "atlas") -> bool:
+        """Check if profile has all required components for the given backend."""
+        if not self.voice_id:
+            return False
+        if lipsync_backend == "atlas":
+            return bool(
+                self.reference_frame_path
+                and Path(self.reference_frame_path).exists()
+            )
+        return bool(
+            self.viseme_library_path
+            and Path(self.viseme_library_path).exists()
+        )
 
 
 class ClonePipeline:
     """
     End-to-end pipeline for creating talking head videos.
 
-    Workflow:
-    1. Capture subject (video + audio)
+    Workflow (Atlas path - default):
+    1. Capture subject face image + audio sample
+    2. Clone voice from audio via ElevenLabs
+    3. Generate TTS audio for response text
+    4. Send TTS audio + face image to Atlas -> lip-synced MP4
+
+    Workflow (Viseme path - legacy):
+    1. Capture subject video + audio
     2. Build viseme library from video
     3. Clone voice from audio
-    4. Generate responses with TTS + viseme timing
-    5. Composite final video
+    4. Generate TTS with viseme timing -> local compositing
     """
 
     def __init__(
         self,
         elevenlabs_api_key: Optional[str] = None,
-        data_dir: str = "data"
+        atlas_api_key: Optional[str] = None,
+        data_dir: str = "data",
+        lipsync_backend: str = "atlas",
     ):
         """
         Initialize the clone pipeline.
 
         Args:
             elevenlabs_api_key: ElevenLabs API key (or env var)
+            atlas_api_key: Atlas API key (or env var)
             data_dir: Base directory for data storage
+            lipsync_backend: "atlas" (default) or "viseme" (legacy)
         """
         self.api_key = elevenlabs_api_key or os.getenv("ELEVENLABS_API_KEY")
+        self.atlas_api_key = atlas_api_key or os.getenv("ATLAS_API_KEY")
         self.data_dir = Path(data_dir)
         self.profiles_dir = self.data_dir / "profiles"
         self.profiles_dir.mkdir(parents=True, exist_ok=True)
+        self.lipsync_backend = lipsync_backend
 
         # Lazy-loaded components
         self._voice_service = None
         self._tts_viseme = None
         self._viseme_builder = None
+        self._atlas_client = None
 
     @property
     def voice_service(self):
@@ -90,6 +111,14 @@ class ClonePipeline:
             from src.viseme.viseme_library import VisemeLibraryBuilder
             self._viseme_builder = VisemeLibraryBuilder()
         return self._viseme_builder
+
+    @property
+    def atlas_client(self):
+        """Lazy-load Atlas lip-sync client."""
+        if self._atlas_client is None:
+            from src.video.atlas_client import AtlasClient
+            self._atlas_client = AtlasClient(api_key=self.atlas_api_key)
+        return self._atlas_client
 
     def create_profile_from_video(
         self,
@@ -209,7 +238,8 @@ class ClonePipeline:
         subject_id: str,
         text: str,
         output_path: str,
-        voice_settings: Optional[Dict[str, float]] = None
+        voice_settings: Optional[Dict[str, float]] = None,
+        lipsync_backend: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Generate a talking head video from text.
@@ -219,25 +249,111 @@ class ClonePipeline:
             text: Text for the subject to speak
             output_path: Path for output video
             voice_settings: Optional voice settings (stability, similarity_boost)
+            lipsync_backend: Override lip-sync backend ("atlas" or "viseme")
 
         Returns:
             Dictionary with output paths and timing info
         """
-        logger.info(f"Generating talking video for '{subject_id}'")
+        backend = lipsync_backend or self.lipsync_backend
+
+        if backend == "atlas":
+            return self._generate_talking_video_atlas(
+                subject_id, text, output_path, voice_settings
+            )
+        else:
+            return self._generate_talking_video_viseme(
+                subject_id, text, output_path, voice_settings
+            )
+
+    def _generate_talking_video_atlas(
+        self,
+        subject_id: str,
+        text: str,
+        output_path: str,
+        voice_settings: Optional[Dict[str, float]] = None,
+    ) -> Dict[str, Any]:
+        """Generate talking video using Atlas API (audio + face image -> MP4)."""
+        logger.info(f"Generating talking video for '{subject_id}' via Atlas")
         start_time = time.time()
 
-        # Load profile
         profile = self._load_profile(subject_id)
         if not profile:
             raise ValueError(f"Profile not found: {subject_id}")
+        if not profile.voice_id:
+            raise ValueError(f"Profile has no voice clone: {subject_id}")
+        if not profile.reference_frame_path or not Path(profile.reference_frame_path).exists():
+            raise ValueError(
+                f"Profile has no reference face image: {subject_id}. "
+                "Atlas requires a face image. Set reference_frame_path on the profile."
+            )
 
+        result = {
+            "subject_id": subject_id,
+            "text": text,
+            "lipsync_backend": "atlas",
+            "timings": {},
+        }
+
+        # 1. Generate TTS audio
+        logger.info("Generating TTS audio...")
+        tts_start = time.time()
+
+        output_path = Path(output_path)
+        audio_path = output_path.with_suffix(".mp3")
+
+        voice_settings = voice_settings or {}
+        from src.voice.elevenlabs_client import ElevenLabsClient
+        tts_client = ElevenLabsClient(api_key=self.api_key)
+        tts_client.generate_speech(
+            text=text,
+            voice_id=profile.voice_id,
+            output_path=str(audio_path),
+            stability=voice_settings.get("stability", 0.5),
+            similarity_boost=voice_settings.get("similarity_boost", 0.75),
+        )
+
+        result["audio_path"] = str(audio_path)
+        result["timings"]["tts"] = time.time() - tts_start
+
+        # 2. Send to Atlas for lip-sync video
+        logger.info("Generating lip-sync video via Atlas...")
+        atlas_start = time.time()
+
+        video_path = self.atlas_client.generate_lipsync(
+            audio_path=str(audio_path),
+            image_path=profile.reference_frame_path,
+            output_path=str(output_path),
+        )
+
+        result["video_path"] = video_path
+        result["timings"]["atlas"] = time.time() - atlas_start
+        result["timings"]["total"] = time.time() - start_time
+
+        logger.info(f"Video generated in {result['timings']['total']:.1f}s: {video_path}")
+        return result
+
+    def _generate_talking_video_viseme(
+        self,
+        subject_id: str,
+        text: str,
+        output_path: str,
+        voice_settings: Optional[Dict[str, float]] = None,
+    ) -> Dict[str, Any]:
+        """Generate talking video using legacy viseme compositing."""
+        logger.info(f"Generating talking video for '{subject_id}' via viseme compositing")
+        start_time = time.time()
+
+        profile = self._load_profile(subject_id)
+        if not profile:
+            raise ValueError(f"Profile not found: {subject_id}")
         if not profile.voice_id:
             raise ValueError(f"Profile has no voice clone: {subject_id}")
 
         result = {
             "subject_id": subject_id,
             "text": text,
-            "timings": {}
+            "lipsync_backend": "viseme",
+            "timings": {},
         }
 
         # 1. Generate TTS with viseme timing
@@ -287,7 +403,6 @@ class ClonePipeline:
         result["timings"]["total"] = time.time() - start_time
 
         logger.info(f"Video generated in {result['timings']['total']:.1f}s: {video_path}")
-
         return result
 
     def generate_response_realtime(

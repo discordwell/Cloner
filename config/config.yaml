@@ -99,10 +99,18 @@ brain:
   max_history: 20
 
 video_backend:
-  default: sora          # "sora" or "kling"
+  default: sora          # "sora" or "kling" (scene video generation)
   kling:
     model: "fal-ai/kling-video/v2.5-turbo/pro/image-to-video"
     fallback_model: "fal-ai/kling-video/o1/image-to-video"
+
+# Lip-sync video generation (audio + face image -> talking head MP4)
+lipsync_backend:
+  default: atlas         # "atlas" or "viseme" (legacy)
+  atlas:
+    api_key: "${ATLAS_API_KEY}"
+    poll_interval: 2.0   # seconds between poll requests
+    timeout: 300.0       # max seconds to wait for job
 
 tts:
   voice_id: nf18MnSL81anCHgQgL1A
