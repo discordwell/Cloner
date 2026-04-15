@@ -3,8 +3,8 @@
 import os
 from pathlib import Path
 from typing import Optional, List, Dict, Any
-from elevenlabs import ElevenLabs, Voice, VoiceSettings
-from elevenlabs.client import AsyncElevenLabs
+from elevenlabs import ElevenLabs
+from elevenlabs.types import VoiceSettings
 import logging
 
 logger = logging.getLogger(__name__)
@@ -68,7 +68,7 @@ class ElevenLabsClient:
         description: Optional[str] = None
     ) -> str:
         """
-        Clone a voice from audio samples.
+        Clone a voice from audio samples using instant voice cloning (IVC).
 
         Args:
             name: Name for the cloned voice
@@ -79,31 +79,28 @@ class ElevenLabsClient:
             voice_id: ID of the cloned voice
         """
         try:
-            # Validate audio files exist
             for audio_file in audio_files:
                 if not Path(audio_file).exists():
                     raise FileNotFoundError(f"Audio file not found: {audio_file}")
 
             logger.info(f"Cloning voice '{name}' from {len(audio_files)} audio files")
 
-            # Open audio files
             files = []
             for audio_path in audio_files:
                 files.append(open(audio_path, 'rb'))
 
             try:
-                # Clone the voice
-                voice = self.client.clone(
+                result = self.client.voices.ivc.create(
                     name=name,
+                    files=files,
                     description=description or f"Cloned voice: {name}",
-                    files=files
                 )
 
-                logger.info(f"Voice cloned successfully: {voice.voice_id}")
-                return voice.voice_id
+                voice_id = result.voice_id
+                logger.info(f"Voice cloned successfully: {voice_id}")
+                return voice_id
 
             finally:
-                # Close all file handles
                 for f in files:
                     f.close()
 
@@ -119,7 +116,8 @@ class ElevenLabsClient:
         stability: float = 0.5,
         similarity_boost: float = 0.75,
         style: float = 0.0,
-        use_speaker_boost: bool = True
+        use_speaker_boost: bool = True,
+        output_format: str = "mp3_44100_128",
     ) -> str:
         """
         Generate speech from text using a specific voice.
@@ -132,6 +130,7 @@ class ElevenLabsClient:
             similarity_boost: Clarity + similarity (0.0 to 1.0)
             style: Style exaggeration (0.0 to 1.0)
             use_speaker_boost: Enable speaker boost for better quality
+            output_format: Audio format (default mp3_44100_128)
 
         Returns:
             Path to the generated audio file
@@ -139,25 +138,21 @@ class ElevenLabsClient:
         try:
             logger.info(f"Generating speech for {len(text)} characters using voice {voice_id}")
 
-            # Generate audio
-            audio = self.client.generate(
+            audio = self.client.text_to_speech.convert(
+                voice_id=voice_id,
                 text=text,
-                voice=Voice(
-                    voice_id=voice_id,
-                    settings=VoiceSettings(
-                        stability=stability,
-                        similarity_boost=similarity_boost,
-                        style=style,
-                        use_speaker_boost=use_speaker_boost
-                    )
-                )
+                output_format=output_format,
+                voice_settings=VoiceSettings(
+                    stability=stability,
+                    similarity_boost=similarity_boost,
+                    style=style,
+                    use_speaker_boost=use_speaker_boost,
+                ),
             )
 
-            # Save to file
             output_path = Path(output_path)
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # audio is a generator, write chunks to file
             with open(output_path, 'wb') as f:
                 for chunk in audio:
                     f.write(chunk)
@@ -188,7 +183,6 @@ class ElevenLabsClient:
         Returns:
             Path to the generated audio file
         """
-        # Find voice ID by name
         voices = self.list_voices()
         voice_id = None
 
