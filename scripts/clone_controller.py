@@ -204,6 +204,12 @@ class CloneAgent:
         self._viseme_base_frame = None
         self._lipsync_available = None  # None = not yet checked
 
+        # Streaming pipeline (Atlas Realtime)
+        self._streaming_pipeline = None
+        self._streaming_playback = None
+        self._use_streaming = CONFIG.get("streaming", "enabled", default=True)
+        self._face_image_path = None
+
         self._log("CloneAgent initialized")
 
     def _log(self, msg):
@@ -266,24 +272,76 @@ Slopify is an AI image/video automation platform demonstrating sophisticated eng
 5. Reference specific technical decisions
 6. Be direct like a founder, not sycophantic"""
 
-    def start(self):
-        """Start the response worker thread."""
+    def start(self, face_image_path=None):
+        """Start the response worker thread and streaming session."""
         if self.running:
             return
         self.running = True
+        self._face_image_path = face_image_path
         self.worker_thread = threading.Thread(target=self._response_worker, daemon=True)
         self.worker_thread.start()
+
+        # Start streaming pipeline session if enabled
+        if self._use_streaming and self._face_image_path:
+            try:
+                self._init_streaming_pipeline()
+            except Exception as e:
+                self._log(f"Streaming pipeline init failed, using legacy: {e}")
+                self._streaming_pipeline = None
+
         self._log("Response worker started")
 
     def stop(self):
-        """Stop the agent."""
+        """Stop the agent and streaming session."""
         self.running = False
+
+        # Tear down streaming pipeline
+        if self._streaming_pipeline:
+            try:
+                self._streaming_pipeline.end_session()
+            except Exception as e:
+                self._log(f"Error ending streaming session: {e}")
+            self._streaming_pipeline = None
+            self._streaming_playback = None
+
         self._log("Agent stopped")
+
+    def _init_streaming_pipeline(self):
+        """Initialize the streaming pipeline with Atlas Realtime."""
+        from src.streaming.pipeline import StreamingPipeline, PipelineConfig
+        from src.streaming.playback import OBSVideoPlayback
+
+        llm_provider = CONFIG.get("streaming", "llm", "provider", default="openai")
+        llm_model = CONFIG.get("streaming", "llm", "model", default=None)
+
+        config = PipelineConfig(
+            llm_provider=llm_provider,
+            llm_model=llm_model,
+            llm_max_tokens=CONFIG.get("streaming", "llm", "max_tokens", default=300),
+            llm_temperature=CONFIG.get("streaming", "llm", "temperature", default=0.8),
+            system_prompt=self.system_prompt,
+            voice_id=DEFAULT_VOICE_ID,
+            face_image_path=self._face_image_path,
+        )
+
+        self._streaming_pipeline = StreamingPipeline(config)
+        self._streaming_playback = OBSVideoPlayback(
+            obs_host=OBS_HOST,
+            obs_port=OBS_PORT,
+            obs_password=OBS_PASSWORD,
+            idle_video_path=os.path.join(VIDEO_DIR, "idle_loop.mp4"),
+            output_dir=TTS_AUDIO_DIR,
+        )
+
+        self._log("Starting Atlas Realtime session...")
+        sid = self._streaming_pipeline.start_session()
+        self._log(f"Streaming pipeline ready: session {sid}")
 
     def on_interviewer_speaks(self, text):
         """Called when the interviewer says something.
 
-        Queues a response if appropriate (not too soon after last response).
+        Queues a response if appropriate. If currently speaking,
+        interrupts the current response to handle the new input.
         """
         if not self.running:
             return
@@ -293,7 +351,13 @@ Slopify is an AI image/video automation platform demonstrating sophisticated eng
             self._log(f"Skipping response (too soon): {text[:50]}")
             return
 
-        # Don't respond if we're currently speaking
+        # If currently speaking via streaming pipeline, interrupt
+        if self.is_speaking and self._streaming_pipeline:
+            self._log(f"Interrupting current response for: {text[:50]}")
+            self._streaming_pipeline.interrupt()
+            self.is_speaking = False
+
+        # Don't respond if we're currently speaking (legacy path)
         if self.is_speaking:
             self._log(f"Skipping response (currently speaking): {text[:50]}")
             return
@@ -324,7 +388,93 @@ Slopify is an AI image/video automation platform demonstrating sophisticated eng
                 traceback.print_exc()
 
     def _generate_and_speak(self, input_text):
-        """Generate a response and speak it through OBS."""
+        """Generate a response and speak it through OBS.
+
+        Uses the streaming pipeline (Atlas Realtime) if available,
+        otherwise falls back to the legacy sequential path.
+        """
+        # Try streaming pipeline first
+        if self._streaming_pipeline and self._streaming_pipeline.is_session_active:
+            try:
+                self._generate_and_speak_streaming(input_text)
+                return
+            except Exception as e:
+                self._log(f"Streaming pipeline failed, falling back to legacy: {e}")
+                import traceback
+                traceback.print_exc()
+
+        # Legacy sequential path
+        self._generate_and_speak_legacy(input_text)
+
+    def _generate_and_speak_streaming(self, input_text):
+        """Generate response via streaming pipeline (Atlas Realtime)."""
+        self.is_speaking = True
+
+        try:
+            if self.on_status:
+                self.on_status("thinking", f"Thinking about: {input_text[:30]}...")
+
+            self._log(f"[STREAMING] Responding to: {input_text[:50]}...")
+
+            # Start recording video frames
+            self._streaming_playback.start_recording()
+
+            def on_sentence(text):
+                self._log(f"[STREAMING] Sentence: {text[:60]}...")
+                if self.on_status:
+                    self.on_status("speaking", f"Speaking: {text[:30]}...")
+
+            def on_first_frame(event):
+                self._log("[STREAMING] First video frame received")
+
+            # Run streaming pipeline (blocks until done)
+            result = self._streaming_pipeline.respond(
+                question=input_text,
+                on_video_frame=self._streaming_playback.push_frame,
+                on_first_frame=on_first_frame,
+                on_sentence=on_sentence,
+            )
+
+            # Add response to conversation history
+            if result.full_response:
+                self.conversation_history.append({
+                    "role": "assistant",
+                    "content": result.full_response,
+                })
+                self._log(f"[STREAMING] Response: {result.full_response[:80]}...")
+
+            # Finalize video and play through OBS
+            self._log(
+                f"[STREAMING] Pipeline done: {result.video_frames} frames, "
+                f"first_frame={result.time_to_first_frame:.2f}s, "
+                f"total={result.total_time:.2f}s"
+            )
+
+            video_path = self._streaming_playback.stop_and_play()
+
+            if video_path:
+                self._log(f"[STREAMING] Played video: {video_path}")
+            else:
+                self._log("[STREAMING] No video frames to play")
+
+            self.last_response_time = time.time()
+
+            if self.on_status:
+                self.on_status("idle", "Listening...")
+
+            self._streaming_playback.cleanup()
+
+        except Exception as e:
+            self._log(f"[STREAMING] Error: {e}")
+            import traceback
+            traceback.print_exc()
+            # Stop recording on error
+            self._streaming_playback.stop_recording()
+        finally:
+            self.is_speaking = False
+
+    def _generate_and_speak_legacy(self, input_text):
+        """Legacy sequential path: GPT -> TTS -> OBS."""
         self.is_speaking = True
 
         try:
@@ -335,10 +485,10 @@ Slopify is an AI image/video automation platform demonstrating sophisticated eng
             # Generate response with GPT
             self._log("Generating response...")
             response = self.openai_client.chat.completions.create(
-                model="gpt-4o",  # Fast model - change to gpt-5.1 when available
+                model="gpt-4o",
                 messages=[
                     {"role": "system", "content": self.system_prompt},
-                    *self.conversation_history[-10:]  # Keep last 10 exchanges
+                    *self.conversation_history[-10:]
                 ],
                 max_tokens=150,
                 temperature=0.8,
@@ -1944,7 +2094,18 @@ class CloneController:
         self.transcriber.start()
 
         # Start the AI agent (will respond to interviewer)
-        self.agent.start()
+        # Pass face reference image for Atlas Realtime streaming
+        face_ref = os.path.join(VIDEO_DIR, "face_reference.png")
+        if not os.path.exists(face_ref):
+            # Fallback: try wet test image or any face capture
+            for fallback in [
+                os.path.join(_project_root, "data", "wet_test", "face_bright.jpg"),
+                *getattr(self, 'face_images', []),
+            ]:
+                if fallback and os.path.exists(fallback):
+                    face_ref = fallback
+                    break
+        self.agent.start(face_image_path=face_ref if os.path.exists(face_ref) else None)
         self.log("Clone agent started - will respond to interviewer")
 
         try:
