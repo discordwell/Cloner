@@ -68,3 +68,7 @@ get-pip.py
 # Auto-ignored — sensitive/binary files
 data/captures/
 data/visemes/
+
+# Autopitch — per-prospect runs contain generated media and cloned voice IDs
+autopitch/runs/*
+!autopitch/runs/.gitkeep

@@ -108,3 +108,34 @@ All config in `config/config.yaml`. API keys in `.env`:
 3. **Backend factory pattern**: `get_video_backend()` abstracts scene video providers. `lipsync_backend` config controls Atlas vs viseme. Both pipelines coexist for fallback.
 
 4. **Cross-platform**: Originally Windows, now macOS primary. Path handling uses `sys.platform` checks.
+
+## Autopitch (procgen cartoon pitch videos)
+
+`autopitch/` is a self-contained subproject that produces a ~60s Pixar-style cartoon video of a prospect pitching AI consulting services to themselves. It reuses Atlas + ElevenLabs and adds web scraping, image/voice search, and a Claude Code agent.
+
+```
+Prospect input (name, url, [extras])
+        |
+        v
+   autopitch/scripts/run.py  ->  runs/{slug}/blueprint.md
+        |
+        v
+   .claude/agents/autopitch.md   (Claude Code subagent orchestrator)
+        |
+        +-- Python scripts
+        |     scrape_site.py   -> site.txt, logo.png
+        |     find_photo.py    -> photo_raw.jpg    (Bing search + mediapipe face)
+        |     find_voice.py    -> voice_sample.wav (yt-dlp + diarization)
+        |     analyze_site.py  -> hypothesis.md    (GPT)
+        |     write_pitch.py   -> pitch.txt        (GPT)
+        |     tts.py           -> pitch.mp3        (ElevenLabs)
+        |     lipsync.py       -> final.mp4        (Atlas)
+        |
+        +-- MCP chrome tools (agent drives chatgpt.com directly)
+              cartoonify_portrait -> photo_cartoon.png
+              cartoonify_scene    -> scene_cartoon.png
+```
+
+Skills in `.claude/skills/autopitch-*/` package reusable prompts. The agent (`.claude/agents/autopitch.md`) walks the `blueprint.md` stages in order and updates state as it goes.
+
+See `autopitch/README.md` for setup and usage.

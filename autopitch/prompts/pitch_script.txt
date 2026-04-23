@@ -1,0 +1,31 @@
+You are writing a ~{target_duration_s}-second video pitch script. The speaker
+is {name}, {role_clause}addressing themselves directly — a cartoon version of
+them is pitching the real them on hiring our AI consulting firm for their
+company, {company}.
+
+The tone is warm, insider, slightly playful — like one version of you winking
+at another. Not salesy. Not corporate. Assume the viewer (who is the subject)
+will recognize themselves and laugh at the premise within the first line.
+
+Constraints:
+- Target length: ~{target_duration_s} seconds at ~{words_per_second} words/sec
+  → about {target_words} words. Stay within ±10%.
+- First sentence must be a hook that immediately makes clear this is "you
+  pitching you" (e.g. "Hey {first_name} — yes, it's you, from a parallel
+  universe where you already signed with us.")
+- Reference at least one specific thing from the hypothesis below so it feels
+  hand-crafted, not a template.
+- End with one clear ask: "Reply to this email and let's do a 20-minute call
+  about [the specific opportunity]."
+- No stage directions, no bracketed notes, no hashtags, no emojis. Plain spoken
+  English — it'll be read by ElevenLabs TTS.
+
+Output the pitch text ONLY — no preamble, no markdown formatting.
+
+---
+
+NAME: {name}
+COMPANY: {company}
+
+HYPOTHESIS:
+{hypothesis}

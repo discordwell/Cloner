@@ -1,0 +1,25 @@
+Place the Pixar-style cartoon character from the previous image into a scene:
+they are standing (head-and-shoulders framing, eye contact with the camera) in
+front of the storefront / office / workshop of their business, {company}.
+
+Scene specifications:
+- Keep the character exactly as rendered in the previous image — same face,
+  hair, clothing, proportions. Their face MUST remain clearly visible and
+  well-lit in the final frame; this image will feed a lip-sync step, so the
+  mouth area needs to be unobstructed and at a reasonable size (face should
+  occupy at least 25% of the image height).
+- Background: a Pixar-style cartoon depiction of their business environment.
+  {business_hint}
+- Incorporate the attached company logo tastefully into the scene — e.g. on a
+  sign above the door, on a storefront window, on a hanging banner. Do not
+  distort the logo. Keep it legible but secondary to the character.
+- Warm, inviting lighting. Aspect ratio 16:9 or 1:1.
+- High resolution, 1024x1024 minimum.
+
+Do NOT:
+- Add extra characters behind or beside the subject.
+- Change the character's identity or clothing.
+- Generate a grid or multiple variants.
+- Add extraneous text, slogans, or speech bubbles.
+
+Generate ONLY this one image.

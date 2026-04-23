@@ -1,0 +1,40 @@
+You are a senior AI consultant writing a one-paragraph hypothesis about how the
+company below could use AI (agents, automation, RAG, realtime, document
+intelligence, etc.) to drive concrete business outcomes.
+
+Read the website content and identify ONE to THREE specific, plausible,
+non-generic places where AI could move the needle. Think about their actual
+business model — what would a consultant who spent 20 minutes on their site
+notice that an AI specialist could help with?
+
+Rules:
+- Be specific to what they actually do. If they make custom cabinets, talk about
+  their actual workflow (quoting, CAD, scheduling) — not "chatbots on your site."
+- Prefer opportunities that imply a 3-6 month engagement, not a weekend script.
+- Skip tired suggestions ("add a chatbot", "AI-powered blog posts") unless you
+  can make them specific and compelling.
+- If the site is thin and you genuinely don't know their business well, say so
+  and offer two hypotheses framed as questions.
+
+Output in this exact markdown structure:
+
+# AI Hypothesis: {company}
+
+**Business in one line:** ...
+
+## Opportunity 1: {short title}
+{2-3 sentences. What they do now, what AI could do, rough outcome metric.}
+
+## Opportunity 2: {short title}
+{2-3 sentences.}
+
+## Opportunity 3: {short title}   (optional; omit if not confident)
+{2-3 sentences.}
+
+---
+
+COMPANY: {company}
+URL: {url}
+
+WEBSITE TEXT:
+{site_text}

@@ -134,6 +134,43 @@ tts:
   speech_timeout: 0.8
   min_speech_duration: 0.5
 
+# Autopitch — procgen cartoon pitch videos (see autopitch/README.md)
+autopitch:
+  runs_dir: "autopitch/runs"
+  default_target_duration_s: 60
+  # Words-per-second used to convert target duration -> pitch length.
+  # ElevenLabs default voices average ~2.4 wps at stability 0.5.
+  words_per_second: 2.4
+  photo_search:
+    provider: "bing"                       # bing | serpapi
+    bing_api_key: "${BING_IMAGE_SEARCH_KEY}"
+    serpapi_key: "${SERPAPI_KEY}"
+    max_candidates: 8
+  voice_search:
+    enabled: true
+    yt_dlp_format: "bestaudio[ext=m4a]/bestaudio"
+    max_duration_s: 1800
+    min_duration_s: 120
+    target_sample_s: 90
+    max_candidates: 3
+  diarization:
+    # Optional. Without an HF token find_voice falls back to a longest-non-silence heuristic.
+    provider: "pyannote"
+    hf_token: "${HUGGINGFACE_TOKEN}"
+  cartoonify:
+    provider: "chatgpt_web"                # driven by the autopitch agent via MCP chrome
+    portrait_prompt_file: "autopitch/prompts/cartoonify_portrait.txt"
+    scene_prompt_file: "autopitch/prompts/cartoonify_scene.txt"
+    # Wait tuning for the stabilization poll (from dwellhome pattern).
+    settle_seconds: 8.0
+    settle_polls: 3
+    settle_interval: 2.0
+    min_image_bytes: 50000
+  llm:
+    provider: "openai"
+    model: "gpt-5.4"
+    fallback_model: "gpt-4o"
+
 # Logging Settings
 logging:
   level: "INFO"  # DEBUG, INFO, WARNING, ERROR

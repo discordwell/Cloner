@@ -1,0 +1,23 @@
+Transform the attached photo into a Pixar-style 3D-rendered cartoon portrait of the same person.
+
+Style specifications:
+- Modern Pixar feature-film look (Up / Inside Out / Soul / Turning Red): warm
+  painterly lighting, soft subsurface-scattering skin, large expressive eyes
+  that stay anatomically natural, slightly exaggerated facial features but
+  still unmistakably the same person.
+- Preserve identity: hair color and style, facial hair, skin tone, eye color,
+  glasses, any distinctive features should all transfer faithfully.
+- Friendly, approachable expression. Three-quarter view or head-on. Eye contact
+  with the camera.
+- Neutral studio background in a soft complementary color — no text, no props,
+  no environment yet (the environment is a separate step).
+- High-resolution, 1024x1024, clean edges, no artifacts, no watermarks.
+
+Do NOT:
+- Add text or logos.
+- Change ethnicity, age, or gender.
+- Produce multiple images or a grid.
+- Apply filters that make it look photographic — this should clearly read as a
+  painted/rendered Pixar cartoon, not a photo.
+
+Generate ONLY this one image. Do not rewrite the prompt or add extra commentary.
