@@ -1,10 +1,11 @@
-"""Find a frontal photo of a person via Bing Image Search + mediapipe face detection.
+"""Find a frontal photo of a person via Bing Image Search + face detection.
 
 Behavior:
   1. Query `"{name}" "{company}"` via Bing Image Search API (or SerpAPI).
   2. Download the top N candidates.
-  3. Run mediapipe face detection; pick the highest-confidence frontal face
-     (face must occupy >=5% of the image area to reject thumbnail hits).
+  3. Run face detection (mediapipe BlazeFace, falling back to OpenCV Haar);
+     pick the highest-confidence frontal face (face must occupy >=5% of the
+     image area to reject thumbnail hits).
   4. Save as {run_dir}/photo_raw.jpg.
 
 Usage:
@@ -23,6 +24,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import List, Optional
 
+import numpy as np
 import requests
 from PIL import Image
 
@@ -32,6 +34,17 @@ BING_ENDPOINT = "https://api.bing.microsoft.com/v7.0/images/search"
 SERPAPI_ENDPOINT = "https://serpapi.com/search.json"
 DEFAULT_TIMEOUT = 15
 MIN_FACE_AREA_RATIO = 0.05  # face bbox must be >= 5% of image area
+
+# mediapipe >= 0.10.21 removed the legacy `mp.solutions` API, and the Tasks
+# API that replaced it does not bundle a model file — so the BlazeFace model
+# is cached in data/models/ (gitignored) and downloaded on first use.
+_FACE_MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/face_detector/"
+    "blaze_face_short_range/float16/latest/blaze_face_short_range.tflite"
+)
+_FACE_MODEL_PATH = (
+    Path(__file__).resolve().parents[2] / "data" / "models" / "blaze_face_short_range.tflite"
+)
 
 
 @dataclass
@@ -96,34 +109,110 @@ def _query_serpapi(name: str, company: str, api_key: str, count: int) -> List[Ca
     return out
 
 
-def _detect_best_face(img: Image.Image) -> Optional[tuple[float, float]]:
-    """Run mediapipe face detection. Return (confidence, face_area_ratio) or None."""
+def _ensure_face_model() -> Optional[Path]:
+    """Return the cached BlazeFace model path, downloading it on first use."""
+    if _FACE_MODEL_PATH.exists():
+        return _FACE_MODEL_PATH
+    try:
+        resp = requests.get(_FACE_MODEL_URL, timeout=DEFAULT_TIMEOUT)
+        resp.raise_for_status()
+        _FACE_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _FACE_MODEL_PATH.with_name(_FACE_MODEL_PATH.name + ".tmp")
+        tmp.write_bytes(resp.content)
+        tmp.replace(_FACE_MODEL_PATH)
+        return _FACE_MODEL_PATH
+    except Exception as e:
+        logger.warning("could not download face detection model: %s", e)
+        return None
+
+
+def _detect_faces_mediapipe(rgb: np.ndarray) -> Optional[List[tuple[float, float]]]:
+    """Detect faces with the mediapipe Tasks API (BlazeFace).
+
+    Returns a list of (confidence, face_area_ratio) — empty when no faces —
+    or None when mediapipe or its model is unavailable, so the caller can
+    fall back to OpenCV.
+    """
     # Import lazily — mediapipe is slow to load
-    import mediapipe as mp
-    import numpy as np
+    try:
+        import mediapipe as mp
+        from mediapipe.tasks import python as mp_tasks
+        from mediapipe.tasks.python import vision as mp_vision
+    except ImportError as e:
+        logger.debug("mediapipe unavailable: %s", e)
+        return None
 
-    rgb = np.array(img.convert("RGB"))
+    model_path = _ensure_face_model()
+    if model_path is None:
+        return None
+
     h, w = rgb.shape[:2]
-    total = h * w
+    total = float(h * w)
+    try:
+        options = mp_vision.FaceDetectorOptions(
+            base_options=mp_tasks.BaseOptions(model_asset_path=str(model_path)),
+            min_detection_confidence=0.4,
+        )
+        with mp_vision.FaceDetector.create_from_options(options) as detector:
+            result = detector.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb))
+    except Exception as e:
+        logger.warning("mediapipe face detection failed: %s", e)
+        return None
 
-    with mp.solutions.face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.4) as fd:
-        res = fd.process(rgb)
-        if not res.detections:
-            return None
-        best_conf = 0.0
-        best_area = 0.0
-        for det in res.detections:
-            conf = float(det.score[0]) if det.score else 0.0
-            bbox = det.location_data.relative_bounding_box
-            area = max(0.0, bbox.width * bbox.height)
-            # Score combines confidence and relative area so a large confident face wins
-            # over a tiny confident one.
-            if conf * area > best_conf * best_area:
-                best_conf = conf
-                best_area = area
-        if best_area < MIN_FACE_AREA_RATIO:
-            return None
-        return best_conf, best_area
+    out = []
+    for det in result.detections:
+        conf = float(det.categories[0].score) if det.categories else 0.0
+        bbox = det.bounding_box  # pixel coordinates, unlike the legacy API
+        out.append((conf, max(0.0, bbox.width * bbox.height) / total))
+    return out
+
+
+def _detect_faces_opencv(rgb: np.ndarray) -> List[tuple[float, float]]:
+    """Haar-cascade fallback (model ships with opencv-python; works offline).
+
+    Less accurate than BlazeFace — misses tilted faces — but keeps the
+    pipeline usable when mediapipe or its model download is unavailable.
+    """
+    import cv2
+
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    h, w = gray.shape[:2]
+    total = float(h * w)
+    cascade = cv2.CascadeClassifier(
+        cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    if cascade.empty():
+        logger.warning("could not load OpenCV haarcascade")
+        return []
+    min_side = max(24, int(0.1 * min(h, w)))
+    rects, _, weights = cascade.detectMultiScale3(
+        gray, scaleFactor=1.1, minNeighbors=6,
+        minSize=(min_side, min_side), outputRejectLevels=True)
+    out = []
+    for (x, y, fw, fh), weight in zip(rects, weights):
+        # levelWeights are unbounded stage scores (roughly 0-10); squash to
+        # 0-1 so scores stay comparable with the mediapipe path.
+        conf = min(1.0, float(np.ravel(weight)[0]) / 10.0)
+        out.append((conf, (fw * fh) / total))
+    return out
+
+
+def _detect_best_face(img: Image.Image) -> Optional[tuple[float, float]]:
+    """Detect faces and return (confidence, face_area_ratio) of the best one.
+
+    Returns None when no detected face passes MIN_FACE_AREA_RATIO.
+    """
+    rgb = np.ascontiguousarray(np.array(img.convert("RGB")))
+    detections = _detect_faces_mediapipe(rgb)
+    if detections is None:
+        detections = _detect_faces_opencv(rgb)
+    if not detections:
+        return None
+    # Score combines confidence and relative area so a large confident face
+    # wins over a tiny confident one.
+    best_conf, best_area = max(detections, key=lambda d: d[0] * d[1])
+    if best_area < MIN_FACE_AREA_RATIO:
+        return None
+    return best_conf, best_area
 
 
 def _download(url: str) -> Optional[Image.Image]:

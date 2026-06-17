@@ -39,6 +39,7 @@ data/audio/*
 data/video/*
 data/models/*
 data/output/*
+data/wet_test/
 !data/audio/.gitkeep
 !data/video/.gitkeep
 !data/models/.gitkeep

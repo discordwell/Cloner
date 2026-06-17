@@ -22,7 +22,7 @@ def _solid_color(size, color=(128, 128, 128)):
 def _noise(size, seed=0):
     rng = np.random.default_rng(seed)
     arr = rng.integers(0, 256, (size[1], size[0], 3), dtype=np.uint8)
-    return Image.fromarray(arr, "RGB")
+    return Image.fromarray(arr)
 
 
 class TestValidateImageQuality:

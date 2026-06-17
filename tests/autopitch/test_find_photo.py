@@ -9,25 +9,103 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from autopitch.scripts.find_photo import _detect_best_face
+from autopitch.scripts import find_photo
+from autopitch.scripts.find_photo import (
+    MIN_FACE_AREA_RATIO,
+    _detect_best_face,
+    _detect_faces_opencv,
+    _ensure_face_model,
+)
 
-mediapipe = pytest.importorskip("mediapipe", reason="mediapipe required for face detection tests")
+
+def _gray_square(size: int = 600) -> Image.Image:
+    return Image.new("RGB", (size, size), (128, 128, 128))
 
 
 class TestDetectBestFace:
     def test_returns_none_for_solid_color(self):
         """A plain gray square clearly has no face."""
-        img = Image.new("RGB", (600, 600), (128, 128, 128))
-        assert _detect_best_face(img) is None
+        assert _detect_best_face(_gray_square()) is None
 
     def test_returns_none_for_random_noise(self):
         """Uniform noise shouldn't trigger a false positive."""
         rng = np.random.default_rng(42)
         arr = rng.integers(0, 256, (600, 600, 3), dtype=np.uint8)
-        img = Image.fromarray(arr, "RGB")
+        img = Image.fromarray(arr)
         # Noise shouldn't produce a confident face detection
         result = _detect_best_face(img)
         # Result may be None OR a low-score detection below MIN_FACE_AREA_RATIO
         if result is not None:
             conf, area = result
-            assert area >= 0.05, "should only return detections above area threshold"
+            assert area >= MIN_FACE_AREA_RATIO, "should only return detections above area threshold"
+
+    def test_rejects_face_below_area_threshold(self, monkeypatch):
+        """A confident but tiny face (thumbnail hit) is rejected."""
+        monkeypatch.setattr(find_photo, "_detect_faces_mediapipe", lambda rgb: [(0.95, 0.01)])
+        assert _detect_best_face(_gray_square()) is None
+
+    def test_picks_highest_scoring_face(self, monkeypatch):
+        """conf*area scoring: a large medium-confidence face beats a small confident one."""
+        monkeypatch.setattr(
+            find_photo, "_detect_faces_mediapipe",
+            lambda rgb: [(0.9, 0.06), (0.5, 0.5)])
+        assert _detect_best_face(_gray_square()) == (0.5, 0.5)
+
+    def test_falls_back_to_opencv_when_mediapipe_unavailable(self, monkeypatch):
+        """None from the mediapipe path (unavailable) routes to the OpenCV path."""
+        monkeypatch.setattr(find_photo, "_detect_faces_mediapipe", lambda rgb: None)
+        calls = []
+
+        def fake_opencv(rgb):
+            calls.append(rgb.shape)
+            return [(0.8, 0.2)]
+
+        monkeypatch.setattr(find_photo, "_detect_faces_opencv", fake_opencv)
+        assert _detect_best_face(_gray_square()) == (0.8, 0.2)
+        assert calls == [(600, 600, 3)]
+
+    def test_empty_mediapipe_result_does_not_fall_back(self, monkeypatch):
+        """No faces found (empty list) is a real answer, not a reason to fall back."""
+        monkeypatch.setattr(find_photo, "_detect_faces_mediapipe", lambda rgb: [])
+
+        def boom(rgb):
+            raise AssertionError("opencv fallback should not run")
+
+        monkeypatch.setattr(find_photo, "_detect_faces_opencv", boom)
+        assert _detect_best_face(_gray_square()) is None
+
+
+class TestOpenCVFallback:
+    def test_no_detections_on_solid_color(self):
+        rgb = np.full((600, 600, 3), 128, dtype=np.uint8)
+        assert _detect_faces_opencv(rgb) == []
+
+    def test_no_detections_on_noise(self):
+        rng = np.random.default_rng(7)
+        rgb = rng.integers(0, 256, (600, 600, 3), dtype=np.uint8)
+        for conf, area in _detect_faces_opencv(rgb):
+            assert 0.0 <= conf <= 1.0
+            assert 0.0 <= area <= 1.0
+
+
+class TestEnsureFaceModel:
+    def test_returns_cached_model_without_network(self, monkeypatch, tmp_path):
+        model = tmp_path / "model.tflite"
+        model.write_bytes(b"cached")
+        monkeypatch.setattr(find_photo, "_FACE_MODEL_PATH", model)
+
+        def boom(*args, **kwargs):
+            raise AssertionError("network should not be hit when model is cached")
+
+        monkeypatch.setattr(find_photo.requests, "get", boom)
+        assert _ensure_face_model() == model
+
+    def test_returns_none_when_download_fails(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(find_photo, "_FACE_MODEL_PATH", tmp_path / "missing.tflite")
+
+        def offline(*args, **kwargs):
+            raise find_photo.requests.RequestException("offline")
+
+        monkeypatch.setattr(find_photo.requests, "get", offline)
+        assert _ensure_face_model() is None
+        assert not (tmp_path / "missing.tflite").exists()
