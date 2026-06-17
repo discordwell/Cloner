@@ -6,6 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from autopitch.scripts.find_voice import (
+    _take_until_target,
     pick_dominant_speaker,
     segments_for_speaker,
 )
@@ -66,3 +67,36 @@ class TestSegmentsForSpeaker:
         ]
         picked = segments_for_speaker(segs, "b", target_s=100)
         assert picked == [(30.0, 60.0)]
+
+    def test_exact_fill_emits_no_zero_length_segment(self):
+        """Regression: when a speaker's segments fill target_s exactly, the next
+        segment used to be appended as a zero-length (s, s) span. That becomes a
+        degenerate `atrim=start=s:end=s` (empty input) in extract_segments'
+        ffmpeg concat filtergraph."""
+        segs = [("A", 0.0, 10.0), ("A", 12.0, 17.0)]
+        picked = segments_for_speaker(segs, "A", target_s=10.0)
+        assert picked == [(0.0, 10.0)]
+        assert all(e - s > 0 for s, e in picked)
+
+
+class TestTakeUntilTarget:
+    def test_trims_final_span_to_target(self):
+        out = _take_until_target([(0.0, 8.0), (8.0, 20.0)], target_s=10.0)
+        assert out == [(0.0, 8.0), (8.0, 10.0)]
+        assert sum(e - s for s, e in out) == 10.0
+
+    def test_stops_on_exact_boundary_without_empty_span(self):
+        out = _take_until_target([(0.0, 5.0), (5.0, 10.0), (10.0, 15.0)], target_s=10.0)
+        assert out == [(0.0, 5.0), (5.0, 10.0)]
+        assert all(e - s > 0 for s, e in out)
+
+    def test_skips_degenerate_input_spans(self):
+        out = _take_until_target([(3.0, 3.0), (3.0, 6.0)], target_s=100.0)
+        assert out == [(3.0, 6.0)]
+
+    def test_undershoot_returns_all_spans(self):
+        out = _take_until_target([(0.0, 2.0), (5.0, 6.0)], target_s=100.0)
+        assert out == [(0.0, 2.0), (5.0, 6.0)]
+
+    def test_empty_input(self):
+        assert _take_until_target([], target_s=10.0) == []

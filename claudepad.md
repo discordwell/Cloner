@@ -2,6 +2,28 @@
 
 ## Session Summaries
 
+### 2026-06-17T09:30Z — Autopitch robustness: find_voice zero-length segment bug, write_pitch hardening
+
+Follow-on maintenance pass on autopitch. Repo green at 182 tests (was 173).
+
+- **find_voice zero-length segment (real bug):** `segments_for_speaker` and
+  `longest_speech_heuristic` shared an accumulation loop that, when a span filled
+  `target_s` *exactly*, appended the next span as a zero-length `(s, s)` trim.
+  That becomes a degenerate `atrim=start=s:end=s` (empty input) in
+  `extract_segments`' ffmpeg concat filtergraph. Extracted a shared
+  `_take_until_target()` helper that stops cleanly when the remaining budget is
+  ≤ a 1ms floor (matching ffmpeg's `:.3f` precision) and also skips degenerate
+  input spans. Both functions now route through it. Added 6 tests (regression +
+  helper coverage).
+- **write_pitch hardening:** finished the thread the prior pass flagged —
+  `build_prompt` used `str.format()`, which is one template-edit away from the
+  same `KeyError` that broke `analyze_site`. Switched to the identical
+  single-pass placeholder-substitution approach (regex over the 8 known names),
+  so example braces in the template and braces in the LLM hypothesis pass through
+  untouched. Also fixed an `IndexError` on an empty `name` (`name.split()[0]`).
+  Verified happy-path output is byte-identical to the old `str.format`. Added 3
+  robustness tests.
+
 ### 2026-06-17T08:38Z — Autopitch maintenance: face-detect modernization, analyze_site fix, test hygiene
 
 Maintenance pass on the autopitch pipeline. Repo green at 173 tests.
@@ -75,10 +97,13 @@ the user to have ChatGPT logged in in Chrome and API keys in `.env`.
 `analyze_site.txt` (and any prompt that gives the LLM an output skeleton) embeds
 literal `{…}` to mean "put your text here". `template.format(**kw)` treats those
 as fields and raises `KeyError`, and it also breaks on `{ }` in scraped/LLM text
-passed as values. Substitute only the known placeholders (single-pass regex /
-explicit replace), leaving other braces literal. `write_pitch.py` currently works
-only because `pitch_script.txt` happens to contain real placeholders — adding any
-example brace there would reintroduce the same crash.
+passed as values. Substitute only the known placeholders (single-pass regex),
+leaving other braces literal. Both prompt-fillers now do this:
+`analyze_site.build_prompt` and `write_pitch.build_prompt` each compile a
+`_PLACEHOLDERS` regex of just their known field names and `re.sub` once — so the
+pattern is consistent and a future example brace in either template is safe. Any
+new prompt-assembly script must follow the same rule; do **not** reintroduce
+`str.format()` on a template that doubles as an output skeleton.
 
 ### Autopitch — mediapipe ≥0.10.21 dropped `mp.solutions`
 The legacy `mp.solutions.face_detection` / `face_mesh` API is gone in modern

@@ -52,3 +52,35 @@ class TestBuildPrompt:
         # 30s × 2.5 = 75 words; 120s × 2.5 = 300 words
         assert "75" in short
         assert "300" in long
+
+
+class TestBuildPromptRobustness:
+    def test_hypothesis_with_braces_does_not_crash(self):
+        """The hypothesis is LLM-generated markdown and routinely carries literal
+        braces (the analyze_site skeleton uses {short title}, and pages embed JSON
+        / CSS). A str.format-based builder is one template edit away from KeyError;
+        the placeholder-substitution builder passes braces through untouched."""
+        messy = '## Opportunity 1: {short title}\nUse config {"x": 1} for RAG.'
+        p = build_prompt(
+            name="Jane Doe", company="Acme", role=None,
+            hypothesis=messy, target_duration_s=60,
+        )
+        assert messy in p
+
+    def test_brace_in_value_is_not_re_substituted(self):
+        """Single pass: a {company} that arrives via the hypothesis stays literal
+        rather than being recursively expanded."""
+        p = build_prompt(
+            name="Jane", company="Acme", role=None,
+            hypothesis="they wrote {company} on their homepage",
+            target_duration_s=60,
+        )
+        assert "{company} on their homepage" in p
+
+    def test_empty_name_does_not_crash(self):
+        """name.split()[0] used to IndexError on an empty/whitespace-only name."""
+        p = build_prompt(
+            name="", company="Acme", role=None,
+            hypothesis="x", target_duration_s=60,
+        )
+        assert "Acme" in p

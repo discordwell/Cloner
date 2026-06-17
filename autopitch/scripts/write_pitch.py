@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -20,24 +21,38 @@ logger = logging.getLogger(__name__)
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 DEFAULT_WPS = 2.4
 
+# Like analyze_site, fill only the known placeholders in a single pass. The
+# hypothesis is LLM-generated markdown that can carry literal braces (the
+# analyze_site skeleton uses {short title}), and the template may grow example
+# braces of its own — str.format() would raise KeyError on either. Substituting
+# just these names leaves every other brace untouched and never re-scans an
+# inserted value (a {company} arriving via the hypothesis stays literal).
+_PLACEHOLDERS = re.compile(
+    r"\{(first_name|name|company|role_clause|hypothesis"
+    r"|target_duration_s|words_per_second|target_words)\}"
+)
+
 
 def build_prompt(name: str, company: str, role: Optional[str],
                   hypothesis: str, target_duration_s: float,
                   words_per_second: float = DEFAULT_WPS) -> str:
+    """Fill the pitch template, preserving any literal braces in the inputs."""
     template = (PROMPTS_DIR / "pitch_script.txt").read_text(encoding="utf-8")
-    first_name = name.split()[0]
+    parts = name.split()
+    first_name = parts[0] if parts else name
     role_clause = f"who runs {company} as {role}, " if role else ""
     target_words = int(round(target_duration_s * words_per_second))
-    return template.format(
-        name=name,
-        first_name=first_name,
-        company=company,
-        role_clause=role_clause,
-        hypothesis=hypothesis,
-        target_duration_s=int(target_duration_s),
-        words_per_second=words_per_second,
-        target_words=target_words,
-    )
+    values = {
+        "name": name,
+        "first_name": first_name,
+        "company": company,
+        "role_clause": role_clause,
+        "hypothesis": hypothesis,
+        "target_duration_s": str(int(target_duration_s)),
+        "words_per_second": str(words_per_second),
+        "target_words": str(target_words),
+    }
+    return _PLACEHOLDERS.sub(lambda m: values[m.group(1)], template)
 
 
 def write_pitch(run_dir: Path, name: str, company: str,

@@ -149,6 +149,35 @@ def pick_dominant_speaker(segments: List[tuple[str, float, float]]) -> str:
     return max(totals, key=totals.get)
 
 
+def _take_until_target(spans: List[tuple[float, float]], target_s: float,
+                        min_tail_s: float = 1e-3) -> List[tuple[float, float]]:
+    """Accumulate (start, end) spans, in the given order, until ~target_s seconds.
+
+    The final span is trimmed so the total lands on target_s. Never emits a zero-
+    or negative-length span: degenerate inputs are skipped, and once the remaining
+    budget falls to/below min_tail_s — e.g. a span filled target_s exactly — we
+    stop cleanly instead of appending an empty trailing trim. (An empty `atrim`
+    makes the concat filtergraph in extract_segments error or glitch, and
+    min_tail_s matches the millisecond precision ffmpeg gets via `:.3f`.)
+    """
+    out: List[tuple[float, float]] = []
+    acc = 0.0
+    for s, e in spans:
+        seg_len = e - s
+        if seg_len <= 0:                     # skip degenerate input spans
+            continue
+        remaining = target_s - acc
+        if remaining <= min_tail_s:          # budget exhausted — stop cleanly
+            break
+        if seg_len <= remaining:
+            out.append((s, e))
+            acc += seg_len
+        else:
+            out.append((s, s + remaining))
+            break
+    return out
+
+
 def segments_for_speaker(segments: List[tuple[str, float, float]], speaker: str,
                           target_s: float) -> List[tuple[float, float]]:
     """Return contiguous segments for `speaker` until we've accumulated target_s seconds.
@@ -156,17 +185,7 @@ def segments_for_speaker(segments: List[tuple[str, float, float]], speaker: str,
     Sorted by start time — keeps natural pacing rather than longest-first.
     """
     spk_segs = sorted([(s, e) for sp, s, e in segments if sp == speaker], key=lambda x: x[0])
-    out: List[tuple[float, float]] = []
-    acc = 0.0
-    for s, e in spk_segs:
-        seg_len = e - s
-        if acc + seg_len <= target_s:
-            out.append((s, e))
-            acc += seg_len
-        else:
-            out.append((s, s + (target_s - acc)))
-            break
-    return out
+    return _take_until_target(spk_segs, target_s)
 
 
 def longest_speech_heuristic(wav_path: Path, target_s: float) -> List[tuple[float, float]]:
@@ -183,17 +202,10 @@ def longest_speech_heuristic(wav_path: Path, target_s: float) -> List[tuple[floa
         return []
 
     ranges_ms.sort(key=lambda r: r[1] - r[0], reverse=True)
-    picked: List[tuple[float, float]] = []
-    acc = 0.0
-    for start_ms, end_ms in ranges_ms:
-        s, e = start_ms / 1000.0, end_ms / 1000.0
-        seg_len = e - s
-        if acc + seg_len <= target_s:
-            picked.append((s, e))
-            acc += seg_len
-        else:
-            picked.append((s, s + (target_s - acc)))
-            break
+    picked = _take_until_target(
+        [(start_ms / 1000.0, end_ms / 1000.0) for start_ms, end_ms in ranges_ms],
+        target_s,
+    )
     picked.sort(key=lambda r: r[0])
     return picked
 
