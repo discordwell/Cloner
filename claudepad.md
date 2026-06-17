@@ -2,6 +2,31 @@
 
 ## Session Summaries
 
+### 2026-06-17T15:10Z — Autopitch download safety: stream-enforced byte cap
+
+Maintenance pass on the autopitch HTTP download paths. Repo green at 199 tests
+(was 182).
+
+- **Unbounded-read fix (real bug):** the two image-fetch helpers read
+  `resp.content` (the whole body at once). `find_photo._download` — which fetches
+  *arbitrary* Bing/SerpAPI result URLs — had **no size cap at all**, and
+  `scrape_site._download_image` set `stream=True` but then read `.content`
+  anyway, capping only via the `Content-Length` *header* (bypassable when a
+  server omits/under-reports it). A hostile or just-large image could pull
+  hundreds of MB into memory.
+- **Shared capped helper:** added `download._stream_capped()` (pre-checks a
+  numeric `Content-Length`, then counts the bytes actually streamed and aborts
+  the instant they cross `max_bytes`) and `download.fetch_bytes()` (in-memory
+  capped fetch, accepts a `session` or per-request `headers`). Refactored
+  `download.download()` (file path) to share `_stream_capped`, and routed both
+  image helpers through `fetch_bytes` with explicit caps (logo 8 MB, photo
+  16 MB). UA/session headers still flow through.
+- **Tests:** new `tests/autopitch/test_download.py` (10 tests; the key
+  regression is *oversize body with no Content-Length still raises*) plus
+  integration tests on `_download_image` and `_download` (cap passed, fail-closed
+  on overflow, tiny-response reject). +17 tests; `download.py` was previously
+  untested.
+
 ### 2026-06-17T09:30Z — Autopitch robustness: find_voice zero-length segment bug, write_pitch hardening
 
 Follow-on maintenance pass on autopitch. Repo green at 182 tests (was 173).
@@ -92,6 +117,17 @@ clawed-command.
 the user to have ChatGPT logged in in Chrome and API keys in `.env`.
 
 ## Key Findings
+
+### Autopitch — fetch third-party URLs through `download.fetch_bytes`, never `resp.content`
+Every autopitch download targets an untrusted URL (ChatGPT image output, a
+prospect's logo, arbitrary image-search hits). `resp.content` / `resp.text` read
+the whole body into memory with no bound, and a `Content-Length`-header check is
+bypassable (servers can omit or under-report it). Use
+`autopitch.scripts.download.fetch_bytes(url, max_bytes=..., session=, headers=)`
+for in-memory fetches and `download.download(url, out_path, max_bytes=...)` for
+file downloads — both share `_stream_capped`, which counts the bytes actually
+streamed and raises `ValueError` the instant they cross the cap. Any new download
+site must go through these, not raw `requests.get().content`.
 
 ### Autopitch — never `str.format()` a prompt template that shows example braces
 `analyze_site.txt` (and any prompt that gives the LLM an output skeleton) embeds

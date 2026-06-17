@@ -1,13 +1,23 @@
-"""Tests for autopitch.scripts.scrape_site (pure HTML parsing helpers)."""
+"""Tests for autopitch.scripts.scrape_site (pure HTML parsing + logo download)."""
 
 import sys
+from io import BytesIO
 from pathlib import Path
 
 from bs4 import BeautifulSoup
+from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from autopitch.scripts import scrape_site
 from autopitch.scripts.scrape_site import _clean_text, _collect_logo_candidates
+
+
+def _png_bytes() -> bytes:
+    """A small but >200-byte PNG (noise compresses past the tiny-file reject)."""
+    buf = BytesIO()
+    Image.effect_noise((64, 64), 80).convert("RGB").save(buf, "PNG")
+    return buf.getvalue()
 
 
 FIXTURE_HTML = """
@@ -70,3 +80,44 @@ class TestLogoCandidates:
         sources = [c[0] for c in cands]
         assert "og:image" not in sources
         assert "favicon" in sources
+
+
+class TestDownloadImage:
+    """_download_image fetches via the capped helper, normalizes to PNG, and
+    fails closed (returns False, writes nothing) on any error."""
+
+    def test_saves_valid_image_as_rgba_png(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(scrape_site, "fetch_bytes", lambda url, **kw: _png_bytes())
+        out = tmp_path / "logo.png"
+        assert scrape_site._download_image("http://x/logo.png", out, session=None) is True
+        assert Image.open(out).mode == "RGBA"
+
+    def test_passes_byte_cap_and_session(self, monkeypatch, tmp_path):
+        seen = {}
+
+        def capture(url, **kw):
+            seen.update(kw)
+            seen["url"] = url
+            return _png_bytes()
+
+        monkeypatch.setattr(scrape_site, "fetch_bytes", capture)
+        sentinel_session = object()
+        scrape_site._download_image("http://x/l.png", tmp_path / "l.png", sentinel_session)
+        assert seen["url"] == "http://x/l.png"
+        assert seen["max_bytes"] == scrape_site.MAX_IMAGE_BYTES
+        assert seen["session"] is sentinel_session
+
+    def test_returns_false_and_writes_nothing_on_cap_overflow(self, monkeypatch, tmp_path):
+        def over_cap(url, **kw):
+            raise ValueError("download exceeds cap")
+
+        monkeypatch.setattr(scrape_site, "fetch_bytes", over_cap)
+        out = tmp_path / "logo.png"
+        assert scrape_site._download_image("http://x/huge", out, session=None) is False
+        assert not out.exists()
+
+    def test_rejects_tiny_response(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(scrape_site, "fetch_bytes", lambda url, **kw: b"\x89PNG")
+        out = tmp_path / "logo.png"
+        assert scrape_site._download_image("http://x/stub", out, session=None) is False
+        assert not out.exists()

@@ -1,6 +1,7 @@
 """Tests for autopitch.scripts.find_photo (face detection on synthetic images)."""
 
 import sys
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
@@ -14,12 +15,19 @@ from autopitch.scripts.find_photo import (
     MIN_FACE_AREA_RATIO,
     _detect_best_face,
     _detect_faces_opencv,
+    _download,
     _ensure_face_model,
 )
 
 
 def _gray_square(size: int = 600) -> Image.Image:
     return Image.new("RGB", (size, size), (128, 128, 128))
+
+
+def _png_bytes(size=(48, 48)) -> bytes:
+    buf = BytesIO()
+    _gray_square(size[0]).resize(size).save(buf, "PNG")
+    return buf.getvalue()
 
 
 class TestDetectBestFace:
@@ -109,3 +117,33 @@ class TestEnsureFaceModel:
         monkeypatch.setattr(find_photo.requests, "get", offline)
         assert _ensure_face_model() is None
         assert not (tmp_path / "missing.tflite").exists()
+
+
+class TestDownloadCandidate:
+    """_download fetches an arbitrary search-hit URL via the capped helper, so a
+    candidate can never pull an unbounded image into memory."""
+
+    def test_returns_decoded_image(self, monkeypatch):
+        monkeypatch.setattr(find_photo, "fetch_bytes", lambda url, **kw: _png_bytes((48, 48)))
+        img = _download("http://x/p.jpg")
+        assert img is not None
+        assert img.size == (48, 48)
+
+    def test_passes_byte_cap_and_user_agent(self, monkeypatch):
+        seen = {}
+
+        def capture(url, **kw):
+            seen.update(kw)
+            return _png_bytes()
+
+        monkeypatch.setattr(find_photo, "fetch_bytes", capture)
+        _download("http://x/p.jpg")
+        assert seen["max_bytes"] == find_photo.MAX_IMAGE_BYTES
+        assert "User-Agent" in seen["headers"]
+
+    def test_returns_none_on_cap_overflow(self, monkeypatch):
+        def over_cap(url, **kw):
+            raise ValueError("download exceeds cap")
+
+        monkeypatch.setattr(find_photo, "fetch_bytes", over_cap)
+        assert _download("http://x/huge.jpg") is None

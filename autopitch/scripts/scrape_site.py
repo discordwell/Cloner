@@ -24,6 +24,8 @@ import requests
 from bs4 import BeautifulSoup
 from PIL import Image
 
+from autopitch.scripts.download import fetch_bytes
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_UA = (
@@ -85,15 +87,10 @@ def _collect_logo_candidates(soup: BeautifulSoup, base_url: str) -> List[tuple[s
 
 
 def _download_image(url: str, out_path: Path, session: requests.Session) -> bool:
-    """Download and normalize to PNG. Returns True on success."""
+    """Download (capped) and normalize to PNG. Returns True on success."""
     try:
-        resp = session.get(url, timeout=DEFAULT_TIMEOUT, stream=True)
-        resp.raise_for_status()
-        size = int(resp.headers.get("content-length", 0))
-        if size > MAX_IMAGE_BYTES:
-            logger.warning("logo candidate %s exceeds size cap (%dB)", url, size)
-            return False
-        data = resp.content
+        data = fetch_bytes(url, timeout=DEFAULT_TIMEOUT,
+                           max_bytes=MAX_IMAGE_BYTES, session=session)
         if len(data) < 200:
             return False
         img = Image.open(BytesIO(data)).convert("RGBA")

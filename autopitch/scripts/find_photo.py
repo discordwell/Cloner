@@ -28,12 +28,15 @@ import numpy as np
 import requests
 from PIL import Image
 
+from autopitch.scripts.download import fetch_bytes
+
 logger = logging.getLogger(__name__)
 
 BING_ENDPOINT = "https://api.bing.microsoft.com/v7.0/images/search"
 SERPAPI_ENDPOINT = "https://serpapi.com/search.json"
 DEFAULT_TIMEOUT = 15
 MIN_FACE_AREA_RATIO = 0.05  # face bbox must be >= 5% of image area
+MAX_IMAGE_BYTES = 16 * 1024 * 1024  # cap per candidate fetch (search hits are arbitrary URLs)
 
 # mediapipe >= 0.10.21 removed the legacy `mp.solutions` API, and the Tasks
 # API that replaced it does not bundle a model file — so the BlazeFace model
@@ -217,11 +220,11 @@ def _detect_best_face(img: Image.Image) -> Optional[tuple[float, float]]:
 
 def _download(url: str) -> Optional[Image.Image]:
     try:
-        resp = requests.get(url, timeout=DEFAULT_TIMEOUT, headers={
-            "User-Agent": "Mozilla/5.0 (compatible; autopitch/1.0)"
-        })
-        resp.raise_for_status()
-        return Image.open(BytesIO(resp.content))
+        data = fetch_bytes(
+            url, timeout=DEFAULT_TIMEOUT, max_bytes=MAX_IMAGE_BYTES,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; autopitch/1.0)"},
+        )
+        return Image.open(BytesIO(data))
     except Exception as e:
         logger.debug("download %s failed: %s", url, e)
         return None
