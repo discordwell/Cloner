@@ -2,6 +2,27 @@
 
 ## Session Summaries
 
+### 2026-06-17T08:38Z — Autopitch maintenance: face-detect modernization, analyze_site fix, test hygiene
+
+Maintenance pass on the autopitch pipeline. Repo green at 173 tests.
+
+- **find_photo face detection** (landed in-progress work): mediapipe ≥0.10.21
+  removed the legacy `mp.solutions` API that `_detect_best_face` used, so on the
+  installed 0.10.32 the stage was broken. Reworked to the mediapipe Tasks API
+  (BlazeFace, model cached in `data/models/`, downloaded on first use) with an
+  OpenCV Haar-cascade fallback for offline/unavailable cases. Added tests for the
+  area threshold, conf×area picking, the mediapipe→opencv fallback boundary, and
+  the model cache.
+- **analyze_site crash (critical):** `analyze()` did `template.format(...)` on a
+  prompt whose example skeleton has literal braces (`{short title}`,
+  `{2-3 sentences …}`) → `KeyError: 'short title'` every run. Extracted a pure
+  `build_prompt()` that substitutes only `{company}/{url}/{site_text}` via a
+  single-pass regex; immune to braces in scraped text. Added regression tests.
+- **Build hygiene:** a bare `pytest` at the repo root aborted because the manual
+  smoke scripts `scripts/test_{sora,person_descriptor}.py` (live-service scripts
+  named `test_*.py`) were collected and `test_sora.py` failed on missing
+  playwright. Added `pytest.ini` with `testpaths = tests`.
+
 ### 2026-04-23T12:55Z — Added autopitch subproject
 
 Built `autopitch/` — a self-contained subproject that procedurally generates
@@ -49,6 +70,23 @@ clawed-command.
 the user to have ChatGPT logged in in Chrome and API keys in `.env`.
 
 ## Key Findings
+
+### Autopitch — never `str.format()` a prompt template that shows example braces
+`analyze_site.txt` (and any prompt that gives the LLM an output skeleton) embeds
+literal `{…}` to mean "put your text here". `template.format(**kw)` treats those
+as fields and raises `KeyError`, and it also breaks on `{ }` in scraped/LLM text
+passed as values. Substitute only the known placeholders (single-pass regex /
+explicit replace), leaving other braces literal. `write_pitch.py` currently works
+only because `pitch_script.txt` happens to contain real placeholders — adding any
+example brace there would reintroduce the same crash.
+
+### Autopitch — mediapipe ≥0.10.21 dropped `mp.solutions`
+The legacy `mp.solutions.face_detection` / `face_mesh` API is gone in modern
+mediapipe (0.10.32 installed). Use the Tasks API (`mediapipe.tasks.python.vision`),
+which needs an explicit `.tflite` model asset (not bundled) — `find_photo.py`
+caches BlazeFace under `data/models/` and downloads on first use, falling back to
+an OpenCV Haar cascade. The legacy `src/viseme/` still uses `mp.solutions` but is
+guarded by try/except (legacy path, Atlas is preferred).
 
 ### Autopitch — cartoonify method
 Use MCP chrome tools (`mcp__claude-in-chrome__*`) to drive `chatgpt.com`, not
