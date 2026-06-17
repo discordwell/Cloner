@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -19,13 +20,25 @@ logger = logging.getLogger(__name__)
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
+# The prompt template embeds an example markdown skeleton with literal braces
+# ({short title}, {2-3 sentences ...}) that must reach the LLM untouched, so we
+# can't use str.format (it would choke on those, and on stray braces in scraped
+# site text). Substitute only the three known placeholders, in a single pass.
+_PLACEHOLDERS = re.compile(r"\{(company|url|site_text)\}")
+
+
+def build_prompt(company: str, url: str, site_text: str) -> str:
+    """Fill the analyze-site template, preserving its literal example braces."""
+    template = (PROMPTS_DIR / "analyze_site.txt").read_text(encoding="utf-8")
+    values = {"company": company, "url": url, "site_text": site_text}
+    return _PLACEHOLDERS.sub(lambda m: values[m.group(1)], template)
+
 
 def analyze(run_dir: Path, company: str, url: str,
              model: str = "gpt-5.4") -> Path:
     """Read run_dir/site.txt, call LLM, write hypothesis.md."""
     site_txt = (run_dir / "site.txt").read_text(encoding="utf-8")
-    template = (PROMPTS_DIR / "analyze_site.txt").read_text(encoding="utf-8")
-    prompt = template.format(company=company, url=url, site_text=site_txt)
+    prompt = build_prompt(company, url, site_txt)
 
     logger.info("analyzing site for %s (%d chars of text)", company, len(site_txt))
     output = complete(prompt, model=model, max_tokens=900, temperature=0.7)
