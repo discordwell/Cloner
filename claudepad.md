@@ -2,6 +2,34 @@
 
 ## Session Summaries
 
+### 2026-06-18T12:07Z — Autopitch find_voice: fix gender-inverting library-voice match
+
+Maintenance pass on the library-voice fallback. Repo green at 228 tests (was 210).
+
+- **Library-voice gender match was inverted (real, user-facing bug):**
+  `pick_library_voice` scored demographics with a bare substring test
+  (`gender.lower() in hay`). Because `"male"` is a substring of `"female"`,
+  asking for `--gender male` scored every *female* voice as a +3 match — the
+  documented knob did the **opposite** of what it says for the common case.
+  The same flaw gave spurious points to `--region us` (⊂ "business"/"focus") and
+  `--age old` (⊂ "bold"/"golden"). Verified empirically before fixing.
+- **Fix:** extracted a pure `_hint_matches()` (whole-word, `\b…\b`, case-insensitive,
+  re.escaped) and `score_library_voice()`. Matching is now whole-word, so
+  `male` never matches `female`; and it also consults ElevenLabs' **structured
+  `labels`** (gender/accent/age), not just the free-text blurb — many modern
+  voices carry demographics only there. Exposed `labels` from
+  `ElevenLabsClient.list_voices()` (1-line, mirrors the existing `get_voice_info`;
+  backward-compatible — no consumer asserts the dict shape). `pick_library_voice`
+  now uses `max(key=…)` (same first-among-top-scorers tie behavior as the old
+  reverse-stable-sort-then-`[0]`, minus the bad sort closure).
+- **Tests (+18):** `TestHintMatches` (the male/female, us/business, old/bold
+  regressions + multi-field + empty/whitespace hint), `TestScoreLibraryVoice`
+  (label vs description paths, accent/age, category tiebreak, combined, missing
+  fields), `TestPickLibraryVoice` (end-to-end gender pick, empty→None, no-match
+  fallback — driven by a fake client injected into `sys.modules`, so it needs no
+  network and no `elevenlabs` install). `pick_library_voice` was previously
+  untested.
+
 ### 2026-06-17T19:45Z — Autopitch download safety: close the last two raw-body fetches (HTML + model)
 
 Maintenance pass completing the download-safety thread. Repo green at 210 tests
@@ -149,6 +177,18 @@ clawed-command.
 the user to have ChatGPT logged in in Chrome and API keys in `.env`.
 
 ## Key Findings
+
+### Autopitch — match demographic hints as whole words, and prefer ElevenLabs `labels`
+`find_voice.pick_library_voice` biases the library-voice pick by gender/region/age.
+A bare substring test is wrong here: `"male"` is a substring of `"female"` (so
+`--gender male` scored female voices), `"us"` of `"business"`/`"focus"`, `"old"`
+of `"bold"`/`"golden"`. Use `_hint_matches()` (whole-word `\b…\b`, re.escaped,
+case-insensitive) and the pure `score_library_voice()`. Both consult ElevenLabs'
+structured `labels` (gender/accent/age) first — `list_voices()` now returns
+`labels`, like `get_voice_info` always has — then fall back to the description/
+name text. Region→accent is still only literal (a `--region us` won't match an
+`accent="american"` label); a small synonym map is the obvious future
+enhancement if region biasing needs to actually bite.
 
 ### Autopitch — fetch third-party URLs through the capped `download` helpers, never `resp.content`/`resp.text`
 Every autopitch download targets an untrusted URL (ChatGPT image output, a

@@ -52,6 +52,7 @@ class ElevenLabsClient:
                     "voice_id": voice.voice_id,
                     "category": voice.category if hasattr(voice, 'category') else None,
                     "description": voice.description if hasattr(voice, 'description') else None,
+                    "labels": voice.labels if hasattr(voice, 'labels') else None,
                 })
 
             logger.info(f"Retrieved {len(voice_list)} voices")

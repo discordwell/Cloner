@@ -1,13 +1,17 @@
 """Tests for autopitch.scripts.find_voice (pure speaker-selection helpers)."""
 
 import sys
+import types
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from autopitch.scripts.find_voice import (
+    _hint_matches,
     _take_until_target,
     pick_dominant_speaker,
+    pick_library_voice,
+    score_library_voice,
     segments_for_speaker,
 )
 
@@ -100,3 +104,128 @@ class TestTakeUntilTarget:
 
     def test_empty_input(self):
         assert _take_until_target([], target_s=10.0) == []
+
+
+class TestHintMatches:
+    def test_gender_male_does_not_match_female(self):
+        """Regression: 'male' is a substring of 'female'. Whole-word matching must
+        not score the opposite gender as a match."""
+        assert _hint_matches("male", "a warm female voice") is False
+        assert _hint_matches("male", "female") is False
+
+    def test_gender_male_matches_male(self):
+        assert _hint_matches("male", "a deep male voice") is True
+        assert _hint_matches("male", "male") is True
+
+    def test_region_us_does_not_match_business(self):
+        """'us' is a substring of 'business'/'focus' — must not match those."""
+        assert _hint_matches("us", "our core business focus") is False
+        assert _hint_matches("us", "us-based, american accent") is True
+
+    def test_age_old_does_not_match_bold(self):
+        assert _hint_matches("old", "a bold, golden tone") is False
+        assert _hint_matches("old", "an old, gravelly voice") is True
+
+    def test_case_insensitive(self):
+        assert _hint_matches("MALE", "a Male narrator") is True
+
+    def test_searches_multiple_fields(self):
+        assert _hint_matches("british", None, "", "British narrator") is True
+        assert _hint_matches("british", "american", "calm voice") is False
+
+    def test_empty_or_none_hint(self):
+        assert _hint_matches("", "anything") is False
+        assert _hint_matches(None, "anything") is False
+
+    def test_whitespace_hint_is_ignored(self):
+        assert _hint_matches("  ", "anything") is False
+
+
+class TestScoreLibraryVoice:
+    def test_gender_match_via_description(self):
+        female = {"name": "Bella", "description": "a young female voice", "category": "x"}
+        assert score_library_voice(female, gender="female") == 3
+        # The bug: scoring a female voice with gender='male' must NOT score the
+        # gender component (old substring test matched because 'female' ⊃ 'male').
+        assert score_library_voice(female, gender="male") == 0
+
+    def test_gender_match_via_structured_label(self):
+        """Many modern voices carry demographics only in `labels`, not the blurb."""
+        v = {"name": "Adam", "description": "", "labels": {"gender": "male"}}
+        assert score_library_voice(v, gender="male") == 3
+        assert score_library_voice(v, gender="female") == 0
+
+    def test_accent_label_matches_region(self):
+        v = {"name": "Dorothy", "description": "", "labels": {"accent": "british"}}
+        assert score_library_voice(v, region="british") == 2
+        assert score_library_voice(v, region="american") == 0
+
+    def test_age_label(self):
+        v = {"name": "Arnold", "description": "", "labels": {"age": "old"}}
+        assert score_library_voice(v, age="old") == 1
+        assert score_library_voice(v, age="young") == 0
+
+    def test_premade_category_tiebreak(self):
+        plain = {"name": "X", "description": "", "category": "cloned"}
+        premade = {"name": "Y", "description": "", "category": "premade"}
+        generated = {"name": "Z", "description": "", "category": "generated"}
+        assert score_library_voice(plain) == 0
+        assert score_library_voice(premade) == 1
+        assert score_library_voice(generated) == 1
+
+    def test_combined_score(self):
+        v = {
+            "name": "Rachel",
+            "description": "a calm young female voice",
+            "labels": {"gender": "female", "accent": "american", "age": "young"},
+            "category": "premade",
+        }
+        # gender(3) + region(2) + age(1) + premade(1)
+        assert score_library_voice(v, gender="female", region="american", age="young") == 7
+
+    def test_missing_fields_are_safe(self):
+        assert score_library_voice({}, gender="male", region="us", age="old") == 0
+        assert score_library_voice({"labels": None}, gender="male") == 0
+
+
+class TestPickLibraryVoice:
+    """Drives pick_library_voice with a fake ElevenLabs client so it never touches
+    the network (and doesn't require the `elevenlabs` package to be installed)."""
+
+    @staticmethod
+    def _install_fake_client(monkeypatch, voices):
+        mod = types.ModuleType("src.voice.elevenlabs_client")
+
+        class FakeClient:
+            def __init__(self, *a, **k):
+                pass
+
+            def list_voices(self):
+                return list(voices)
+
+        mod.ElevenLabsClient = FakeClient
+        monkeypatch.setitem(sys.modules, "src.voice.elevenlabs_client", mod)
+
+    def test_picks_correct_gender_end_to_end(self, monkeypatch):
+        voices = [
+            {"voice_id": "f1", "name": "Bella", "labels": {"gender": "female"}},
+            {"voice_id": "m1", "name": "Adam", "labels": {"gender": "male"}},
+        ]
+        self._install_fake_client(monkeypatch, voices)
+        # The whole point of the fix: asking for male returns the male voice, not
+        # the female one (which the old substring scorer would have tied/picked).
+        assert pick_library_voice(gender="male") == ("m1", "Adam")
+        assert pick_library_voice(gender="female") == ("f1", "Bella")
+
+    def test_returns_none_when_no_voices(self, monkeypatch):
+        self._install_fake_client(monkeypatch, [])
+        assert pick_library_voice(gender="male") is None
+
+    def test_falls_back_to_first_on_no_match(self, monkeypatch):
+        voices = [
+            {"voice_id": "a", "name": "A", "category": "cloned"},
+            {"voice_id": "b", "name": "B", "category": "cloned"},
+        ]
+        self._install_fake_client(monkeypatch, voices)
+        # No hints match anything; max keeps the first voice in API order.
+        assert pick_library_voice(gender="male") == ("a", "A")

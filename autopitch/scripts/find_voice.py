@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -238,6 +239,46 @@ def extract_segments(wav_path: Path, segments: List[tuple[float, float]], out_pa
 
 # ── Library-voice fallback ─────────────────────────────────────────
 
+def _hint_matches(hint: Optional[str], *fields: Optional[str]) -> bool:
+    """True if ``hint`` occurs as a whole word in any of ``fields`` (case-insensitive).
+
+    Whole-word, not substring: ``"male"`` is a substring of ``"female"`` (so the
+    old ``hint in haystack`` test scored the *opposite* gender as a match), ``"us"``
+    is a substring of ``"business"``/``"focus"``, and ``"old"`` of ``"bold"``/
+    ``"golden"``. Matching on word boundaries kills those false positives.
+    """
+    hint = (hint or "").strip()
+    if not hint:
+        return False
+    pattern = re.compile(rf"\b{re.escape(hint)}\b", re.IGNORECASE)
+    return any(f and pattern.search(f) for f in fields)
+
+
+def score_library_voice(voice: dict, gender: Optional[str] = None,
+                         region: Optional[str] = None,
+                         age: Optional[str] = None) -> int:
+    """Score an ElevenLabs voice dict against demographic hints (higher = better).
+
+    Consults the structured ``labels`` ElevenLabs attaches (gender / accent / age)
+    as well as the free-text description and name, matching each hint as a whole
+    word so e.g. gender='male' never matches a 'female' voice.
+    """
+    labels = voice.get("labels") or {}
+    desc = voice.get("description")
+    name = voice.get("name")
+    s = 0
+    if gender and _hint_matches(gender, labels.get("gender"), desc, name):
+        s += 3
+    if region and _hint_matches(region, labels.get("accent"), desc, name):
+        s += 2
+    if age and _hint_matches(age, labels.get("age"), desc, name):
+        s += 1
+    # Prefer premade/generated voices — high-quality defaults — to break ties.
+    if voice.get("category") in ("premade", "generated"):
+        s += 1
+    return s
+
+
 def pick_library_voice(gender: Optional[str] = None, region: Optional[str] = None,
                         age: Optional[str] = None) -> Optional[tuple[str, str]]:
     """Pick the closest ElevenLabs library voice. Returns (voice_id, voice_name)."""
@@ -246,27 +287,12 @@ def pick_library_voice(gender: Optional[str] = None, region: Optional[str] = Non
 
     client = ElevenLabsClient()
     voices = client.list_voices()
-
-    def score(v: dict) -> int:
-        lbls = (v.get("description") or "").lower()
-        name = (v.get("name") or "").lower()
-        hay = f"{lbls} {name}"
-        s = 0
-        if gender and gender.lower() in hay:
-            s += 3
-        if region and region.lower() in hay:
-            s += 2
-        if age and age.lower() in hay:
-            s += 1
-        # Prefer premade/generated voices as they're high-quality defaults
-        if v.get("category") in ("premade", "generated"):
-            s += 1
-        return s
-
-    voices.sort(key=score, reverse=True)
     if not voices:
         return None
-    best = voices[0]
+    # max() keeps the first voice (API order) among the top scorers, matching the
+    # old reverse-stable-sort-then-[0] behavior — but without scoring the wrong
+    # gender as a match.
+    best = max(voices, key=lambda v: score_library_voice(v, gender, region, age))
     return best["voice_id"], best["name"]
 
 
