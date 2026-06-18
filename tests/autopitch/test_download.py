@@ -14,16 +14,17 @@ import requests
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from autopitch.scripts import download
-from autopitch.scripts.download import fetch_bytes
+from autopitch.scripts.download import fetch_bytes, fetch_text
 
 
 class FakeResponse:
     """Minimal stand-in for a streaming requests.Response."""
 
-    def __init__(self, chunks, headers=None, status=200):
+    def __init__(self, chunks, headers=None, status=200, encoding=None):
         self._chunks = list(chunks)
         self.headers = headers or {}
         self._status = status
+        self.encoding = encoding
 
     def __enter__(self):
         return self
@@ -105,6 +106,69 @@ class TestFetchBytes:
         _patch_get(monkeypatch, FakeResponse([], status=404))
         with pytest.raises(requests.HTTPError):
             fetch_bytes("http://x")
+
+
+class TestFetchText:
+    """fetch_text caps the streamed body (resp.text would not) and decodes it."""
+
+    def test_decodes_joined_chunks(self, monkeypatch):
+        _patch_get(monkeypatch, FakeResponse([b"hel", b"lo"]))
+        assert fetch_text("http://x") == "hello"
+
+    def test_caps_when_no_content_length_header(self, monkeypatch):
+        # The point of the helper: a missing Content-Length can't slip an
+        # unbounded HTML body past the cap, unlike resp.text.
+        _patch_get(monkeypatch, FakeResponse([b"x" * 1000] * 10))
+        with pytest.raises(ValueError, match="exceeds"):
+            fetch_text("http://x", max_bytes=5000)
+
+    def test_rejects_oversize_content_length_before_streaming(self, monkeypatch):
+        resp = FakeResponse([b"x"], headers={"content-length": "999999"})
+        _patch_get(monkeypatch, resp)
+        with pytest.raises(ValueError, match="declared size"):
+            fetch_text("http://x", max_bytes=1000)
+
+    def test_honors_explicit_declared_encoding(self, monkeypatch):
+        # An explicit non-default header charset is trusted as-is. latin-1 'é' is
+        # byte 0xe9; decoding as utf-8 would mangle it.
+        _patch_get(monkeypatch, FakeResponse([b"caf\xe9"], encoding="latin-1"))
+        assert fetch_text("http://x") == "café"
+
+    def test_sniffs_utf8_when_header_charset_is_the_iso8859_default(self, monkeypatch):
+        # requests stamps resp.encoding='ISO-8859-1' on any text/* response with
+        # no explicit charset. A UTF-8 page (charset only in <meta>) must still
+        # decode correctly — detection overrides the legacy default rather than
+        # mojibaking. (This is the case bare resp.text gets wrong.)
+        body = "Bonjour, je m'appelle Renée. Le café coûte 3€ à Montréal.".encode("utf-8")
+        _patch_get(monkeypatch, FakeResponse([body], encoding="ISO-8859-1"))
+        assert fetch_text("http://x") == body.decode("utf-8")
+
+    def test_falls_back_to_utf8_on_unknown_codec(self, monkeypatch):
+        _patch_get(monkeypatch, FakeResponse([b"hi"], encoding="not-a-real-codec"))
+        assert fetch_text("http://x") == "hi"
+
+    def test_never_raises_on_undecodable_bytes(self, monkeypatch):
+        # No declared encoding + bytes that aren't valid utf-8 → errors="replace".
+        _patch_get(monkeypatch, FakeResponse([b"\xff\xfe\x00"]))
+        assert isinstance(fetch_text("http://x"), str)
+
+    def test_passes_session_and_headers(self, monkeypatch):
+        seen = {}
+
+        class FakeSession:
+            def get(self, url, **kwargs):
+                seen.update(kwargs)
+                seen["url"] = url
+                return FakeResponse([b"ok"])
+
+        def forbidden(*a, **k):
+            raise AssertionError("requests.get must not be used when a session is given")
+
+        monkeypatch.setattr(download.requests, "get", forbidden)
+        fetch_text("http://x", session=FakeSession(), headers={"User-Agent": "ua"})
+        assert seen["url"] == "http://x"
+        assert seen["stream"] is True
+        assert seen["headers"] == {"User-Agent": "ua"}
 
 
 class TestDownloadToFile:

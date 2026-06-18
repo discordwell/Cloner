@@ -103,20 +103,47 @@ class TestEnsureFaceModel:
         monkeypatch.setattr(find_photo, "_FACE_MODEL_PATH", model)
 
         def boom(*args, **kwargs):
-            raise AssertionError("network should not be hit when model is cached")
+            raise AssertionError("downloader should not run when model is cached")
 
-        monkeypatch.setattr(find_photo.requests, "get", boom)
+        monkeypatch.setattr(find_photo, "download_file", boom)
         assert _ensure_face_model() == model
 
-    def test_returns_none_when_download_fails(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(find_photo, "_FACE_MODEL_PATH", tmp_path / "missing.tflite")
+    def test_streams_through_capped_downloader_then_atomically_replaces(self, monkeypatch, tmp_path):
+        """The model fetch routes through download.download (capped, stream-to-disk)
+        and only the final path — never the .tmp — survives."""
+        model = tmp_path / "models" / "face.tflite"
+        monkeypatch.setattr(find_photo, "_FACE_MODEL_PATH", model)
+        seen = {}
 
-        def offline(*args, **kwargs):
-            raise find_photo.requests.RequestException("offline")
+        def fake_download(url, out_path, **kwargs):
+            seen["url"] = url
+            seen["out_path"] = Path(out_path)
+            seen["max_bytes"] = kwargs.get("max_bytes")
+            Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(out_path).write_bytes(b"model-bytes")
+            return len(b"model-bytes")
 
-        monkeypatch.setattr(find_photo.requests, "get", offline)
+        monkeypatch.setattr(find_photo, "download_file", fake_download)
+        assert _ensure_face_model() == model
+        assert model.read_bytes() == b"model-bytes"
+        # capped, and written to a temp sibling before the atomic replace
+        assert seen["max_bytes"] == find_photo.MAX_FACE_MODEL_BYTES
+        assert seen["out_path"].name == "face.tflite.tmp"
+        assert not seen["out_path"].exists()
+
+    def test_returns_none_and_cleans_temp_when_download_fails(self, monkeypatch, tmp_path):
+        """A mid-stream failure (e.g. cap overflow) leaves no model and no .tmp."""
+        model = tmp_path / "missing.tflite"
+        monkeypatch.setattr(find_photo, "_FACE_MODEL_PATH", model)
+
+        def fail_midstream(url, out_path, **kwargs):
+            Path(out_path).write_bytes(b"partial")   # partial temp written, then boom
+            raise ValueError("download exceeds cap")
+
+        monkeypatch.setattr(find_photo, "download_file", fail_midstream)
         assert _ensure_face_model() is None
-        assert not (tmp_path / "missing.tflite").exists()
+        assert not model.exists()
+        assert not model.with_name(model.name + ".tmp").exists()
 
 
 class TestDownloadCandidate:

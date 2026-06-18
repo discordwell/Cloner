@@ -65,6 +65,60 @@ def fetch_bytes(url: str, *, timeout: int = DEFAULT_TIMEOUT,
         return b"".join(_stream_capped(resp, max_bytes))
 
 
+def _sniff_encoding(body: bytes) -> Optional[str]:
+    """Best-effort charset detection on already-read bytes.
+
+    Mirrors what ``requests`` does for ``Response.apparent_encoding`` (which we
+    can't use here — the stream is consumed), trying whichever detector requests
+    bundles. Returns ``None`` if neither is importable or detection fails.
+    """
+    try:
+        from charset_normalizer import from_bytes
+        match = from_bytes(body).best()
+        if match is not None:
+            return match.encoding
+    except Exception:
+        pass
+    try:
+        import chardet
+        return chardet.detect(body).get("encoding")
+    except Exception:
+        return None
+
+
+def fetch_text(url: str, *, timeout: int = DEFAULT_TIMEOUT,
+                max_bytes: int = MAX_BYTES,
+                session: Optional[requests.Session] = None,
+                headers: Optional[Dict[str, str]] = None) -> str:
+    """Fetch ``url`` and decode it to text, capped at ``max_bytes``.
+
+    Like :func:`fetch_bytes` but returns ``str``. The point is the same byte cap:
+    ``resp.text`` would read an unbounded body into memory, which matters because
+    every caller fetches a third-party URL.
+
+    Charset resolution improves on bare ``resp.text``: ``requests`` applies a
+    legacy ISO-8859-1 *default* to any ``text/*`` response whose header omits a
+    charset, which mojibakes a UTF-8 page that declares its charset only in a
+    ``<meta>`` tag (the common case). So we trust the header only when it
+    explicitly named a non-default charset; otherwise we detect from the bytes
+    (``charset_normalizer`` reads ``<meta>``/BOM/statistics), then fall back to
+    UTF-8 — always with ``errors="replace"`` so a stray byte never raises.
+    """
+    getter = session.get if session is not None else requests.get
+    with getter(url, timeout=timeout, stream=True, headers=headers) as resp:
+        resp.raise_for_status()
+        body = b"".join(_stream_capped(resp, max_bytes))
+    declared = getattr(resp, "encoding", None)
+    if declared and declared.lower() != "iso-8859-1":   # explicit header charset
+        encoding = declared
+    else:                                               # default/missing → detect
+        encoding = _sniff_encoding(body) or declared or "utf-8"
+    try:
+        return body.decode(encoding, errors="replace")
+    except LookupError:                                 # unknown codec from a bad header
+        return body.decode("utf-8", errors="replace")
+
+
 def download(url: str, out_path: Path, timeout: int = DEFAULT_TIMEOUT,
               max_bytes: int = MAX_BYTES) -> int:
     """Stream-download ``url`` to ``out_path``, capped at ``max_bytes``.

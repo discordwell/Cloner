@@ -24,7 +24,7 @@ import requests
 from bs4 import BeautifulSoup
 from PIL import Image
 
-from autopitch.scripts.download import fetch_bytes
+from autopitch.scripts.download import fetch_bytes, fetch_text
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,11 @@ DEFAULT_UA = (
 DEFAULT_TIMEOUT = 15
 MAX_TEXT_CHARS = 8000
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
+# A homepage is still a third-party URL; cap the HTML so a hostile or
+# misconfigured server can't stream an unbounded body into memory. Generous
+# enough for any real homepage's source (inline CSS/JS included; images are
+# external).
+MAX_HTML_BYTES = 10 * 1024 * 1024
 
 
 @dataclass
@@ -110,9 +115,7 @@ def scrape(url: str, run_dir: Path, timeout: int = DEFAULT_TIMEOUT,
     session.headers["User-Agent"] = user_agent
 
     logger.info("scraping %s", url)
-    resp = session.get(url, timeout=timeout)
-    resp.raise_for_status()
-    html = resp.text
+    html = fetch_text(url, timeout=timeout, max_bytes=MAX_HTML_BYTES, session=session)
 
     html_path = run_dir / "site.html"
     html_path.write_text(html, encoding="utf-8")

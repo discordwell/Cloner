@@ -28,6 +28,7 @@ import numpy as np
 import requests
 from PIL import Image
 
+from autopitch.scripts.download import download as download_file
 from autopitch.scripts.download import fetch_bytes
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ SERPAPI_ENDPOINT = "https://serpapi.com/search.json"
 DEFAULT_TIMEOUT = 15
 MIN_FACE_AREA_RATIO = 0.05  # face bbox must be >= 5% of image area
 MAX_IMAGE_BYTES = 16 * 1024 * 1024  # cap per candidate fetch (search hits are arbitrary URLs)
+MAX_FACE_MODEL_BYTES = 64 * 1024 * 1024  # BlazeFace is ~230KB; this is a safe ceiling
 
 # mediapipe >= 0.10.21 removed the legacy `mp.solutions` API, and the Tasks
 # API that replaced it does not bundle a model file — so the BlazeFace model
@@ -113,19 +115,23 @@ def _query_serpapi(name: str, company: str, api_key: str, count: int) -> List[Ca
 
 
 def _ensure_face_model() -> Optional[Path]:
-    """Return the cached BlazeFace model path, downloading it on first use."""
+    """Return the cached BlazeFace model path, downloading it on first use.
+
+    Streams to a temp file through the capped downloader (then atomically
+    replaces), rather than reading the whole body into memory — the file lives
+    on disk anyway, and the cap keeps a misbehaving CDN from blowing up memory.
+    """
     if _FACE_MODEL_PATH.exists():
         return _FACE_MODEL_PATH
+    tmp = _FACE_MODEL_PATH.with_name(_FACE_MODEL_PATH.name + ".tmp")
     try:
-        resp = requests.get(_FACE_MODEL_URL, timeout=DEFAULT_TIMEOUT)
-        resp.raise_for_status()
-        _FACE_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-        tmp = _FACE_MODEL_PATH.with_name(_FACE_MODEL_PATH.name + ".tmp")
-        tmp.write_bytes(resp.content)
+        download_file(_FACE_MODEL_URL, tmp, timeout=DEFAULT_TIMEOUT,
+                      max_bytes=MAX_FACE_MODEL_BYTES)
         tmp.replace(_FACE_MODEL_PATH)
         return _FACE_MODEL_PATH
     except Exception as e:
         logger.warning("could not download face detection model: %s", e)
+        tmp.unlink(missing_ok=True)
         return None
 
 

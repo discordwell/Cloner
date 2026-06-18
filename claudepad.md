@@ -2,6 +2,38 @@
 
 ## Session Summaries
 
+### 2026-06-17T19:45Z — Autopitch download safety: close the last two raw-body fetches (HTML + model)
+
+Maintenance pass completing the download-safety thread. Repo green at 210 tests
+(was 199).
+
+- **Homepage HTML was an unbounded read (real gap):** `scrape_site.scrape()`
+  still did `session.get(url).text` — an in-memory read of a third-party URL
+  (the prospect's homepage, fetched first/unconditionally) with no cap, directly
+  contradicting the project's own stated invariant. Routed it through a new
+  `download.fetch_text()` (capped at 10 MB) so a hostile/misconfigured server
+  can't stream gigabytes into memory.
+- **`fetch_text` also fixes a latent charset bug** (caught in code review):
+  requests stamps `resp.encoding='ISO-8859-1'` (a hardcoded *default*) on any
+  `text/*` response whose header omits a charset — the common case, since most
+  sites declare charset only in a `<meta>` tag. Bare `resp.text` (and my first
+  cut of `fetch_text`, which short-circuited on the truthy default) decode UTF-8
+  pages as Latin-1 → mojibake in `site.txt` → degraded pitch for any accented
+  company. Fixed: trust the header only when it explicitly named a non-default
+  charset; otherwise sniff via `charset_normalizer` (which reads `<meta>`/BOM),
+  then fall back to UTF-8 with `errors="replace"`. Strict improvement over the
+  old code; regression test included.
+- **Model download streamed into memory:** `find_photo._ensure_face_model()`
+  read the BlazeFace model with `resp.content`. Trusted Google URL, low risk,
+  but inconsistent — now streams to a `.tmp` via the capped `download.download()`
+  then atomically replaces, with `tmp.unlink(missing_ok=True)` cleanup on
+  failure.
+- **Tests (+11):** `TestFetchText` (cap enforced sans Content-Length, explicit
+  vs default charset, undecodable bytes, session/headers), a `TestScrape`
+  integration test (HTML routed through the capped fetch with the byte cap), and
+  a rewritten `TestEnsureFaceModel` (streams via the capped downloader, atomic
+  replace, tmp cleanup on failure). The invariant is now fully enforced.
+
 ### 2026-06-17T15:10Z — Autopitch download safety: stream-enforced byte cap
 
 Maintenance pass on the autopitch HTTP download paths. Repo green at 199 tests
@@ -118,16 +150,28 @@ the user to have ChatGPT logged in in Chrome and API keys in `.env`.
 
 ## Key Findings
 
-### Autopitch — fetch third-party URLs through `download.fetch_bytes`, never `resp.content`
+### Autopitch — fetch third-party URLs through the capped `download` helpers, never `resp.content`/`resp.text`
 Every autopitch download targets an untrusted URL (ChatGPT image output, a
-prospect's logo, arbitrary image-search hits). `resp.content` / `resp.text` read
-the whole body into memory with no bound, and a `Content-Length`-header check is
-bypassable (servers can omit or under-report it). Use
-`autopitch.scripts.download.fetch_bytes(url, max_bytes=..., session=, headers=)`
-for in-memory fetches and `download.download(url, out_path, max_bytes=...)` for
-file downloads — both share `_stream_capped`, which counts the bytes actually
-streamed and raises `ValueError` the instant they cross the cap. Any new download
-site must go through these, not raw `requests.get().content`.
+prospect's logo/homepage, arbitrary image-search hits). `resp.content` /
+`resp.text` read the whole body into memory with no bound, and a
+`Content-Length`-header check is bypassable (servers can omit or under-report
+it). Use the three capped helpers in `autopitch.scripts.download`, all sharing
+`_stream_capped` (counts bytes actually streamed, raises `ValueError` the
+instant they cross the cap):
+- `fetch_bytes(url, max_bytes=, session=, headers=)` — in-memory binary fetch.
+- `fetch_text(url, max_bytes=, session=, headers=)` — in-memory text fetch; also
+  fixes a charset bug `resp.text` has — requests stamps the legacy ISO-8859-1
+  *default* on `text/*` responses with no header charset, mojibaking UTF-8 pages
+  that declare charset only in `<meta>`; `fetch_text` sniffs (charset_normalizer)
+  whenever the header didn't explicitly name a non-default charset.
+- `download(url, out_path, max_bytes=)` — stream-to-file.
+
+As of 2026-06-17 the invariant is **fully enforced**: the homepage HTML fetch
+(`scrape_site.scrape`) routes through `fetch_text`, and the BlazeFace model
+fetch (`find_photo._ensure_face_model`) streams to a temp file via `download`
+then atomically replaces. The only remaining raw `requests.get` are the
+Bing/SerpAPI search calls, which hit trusted APIs and read bounded JSON via
+`resp.json()` — leave those. Any new body download must go through these helpers.
 
 ### Autopitch — never `str.format()` a prompt template that shows example braces
 `analyze_site.txt` (and any prompt that gives the LLM an output skeleton) embeds

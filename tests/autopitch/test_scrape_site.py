@@ -121,3 +121,44 @@ class TestDownloadImage:
         out = tmp_path / "logo.png"
         assert scrape_site._download_image("http://x/stub", out, session=None) is False
         assert not out.exists()
+
+
+class TestScrape:
+    """scrape() fetches the homepage HTML through the capped text helper (not
+    resp.text), then persists html/text and the best logo."""
+
+    def test_routes_html_through_capped_fetch_text(self, monkeypatch, tmp_path):
+        seen = {}
+
+        def fake_fetch_text(url, **kw):
+            seen.update(kw)
+            seen["url"] = url
+            return FIXTURE_HTML
+
+        monkeypatch.setattr(scrape_site, "fetch_text", fake_fetch_text)
+        # First logo candidate (og:image) "succeeds".
+        monkeypatch.setattr(
+            scrape_site, "_download_image",
+            lambda url, out, session: (out.write_bytes(_png_bytes()) or True))
+
+        result = scrape_site.scrape("https://acme.com/", tmp_path)
+
+        # The HTML went through fetch_text with the byte cap and the UA session.
+        assert seen["url"] == "https://acme.com/"
+        assert seen["max_bytes"] == scrape_site.MAX_HTML_BYTES
+        assert seen["session"] is not None
+        # Artifacts persisted, title + first logo tier resolved.
+        assert (tmp_path / "site.html").read_text() == FIXTURE_HTML
+        assert "We make widgets" in (tmp_path / "site.txt").read_text()
+        assert result.title == "Acme Widgets"
+        assert result.logo_source == "og:image"
+
+    def test_continues_without_logo_when_all_candidates_fail(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(scrape_site, "fetch_text", lambda url, **kw: FIXTURE_HTML)
+        monkeypatch.setattr(scrape_site, "_download_image",
+                            lambda url, out, session: False)
+        result = scrape_site.scrape("https://acme.com/", tmp_path)
+        assert result.logo_path is None
+        assert result.logo_source is None
+        # text extraction still happened
+        assert (tmp_path / "site.txt").exists()
