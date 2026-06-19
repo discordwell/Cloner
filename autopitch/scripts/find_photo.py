@@ -230,7 +230,16 @@ def _download(url: str) -> Optional[Image.Image]:
             url, timeout=DEFAULT_TIMEOUT, max_bytes=MAX_IMAGE_BYTES,
             headers={"User-Agent": "Mozilla/5.0 (compatible; autopitch/1.0)"},
         )
-        return Image.open(BytesIO(data))
+        img = Image.open(BytesIO(data))
+        # Force the full decode *now*, inside this try/except. Image.open is lazy:
+        # a truncated/corrupt body (or a non-image error page served as 200, or a
+        # decompression-bomb image whose tiny file expands to a huge pixel array)
+        # opens fine and only blows up when pixels are first touched — which would
+        # otherwise happen later in _detect_best_face, outside any guard, killing
+        # the whole candidate loop on one bad search hit. Search URLs are
+        # arbitrary third-party content, so this is the common case, not the edge.
+        img.load()
+        return img
     except Exception as e:
         logger.debug("download %s failed: %s", url, e)
         return None

@@ -2,6 +2,31 @@
 
 ## Session Summaries
 
+### 2026-06-19T04:07Z — Autopitch find_photo: decode candidate images eagerly so one bad search hit can't crash the stage
+
+Maintenance pass on the image-search path. Repo green at 232 tests (was 228).
+
+- **Lazy-decode crash (real, user-facing bug):** `find_photo._download` returned
+  `Image.open(BytesIO(data))` — a *lazy* handle. Its `try/except` therefore only
+  caught failures at *open* time, but a truncated/corrupt image (a common case
+  among arbitrary Bing/SerpAPI result URLs) opens fine and only raises
+  `OSError: image file is truncated` when its pixels are first touched — which
+  happens later in `_detect_best_face` (`np.array(img.convert("RGB"))`), **outside
+  any guard**. So one bad candidate aborted the whole `find_photo` stage even when
+  good candidates remained. Verified empirically, then with a revert test: the two
+  new decode tests fail with exactly that `OSError` on the old code.
+- **Fix:** force the full decode (`img.load()`) inside `_download`'s existing
+  try/except, so a bad body becomes a clean `None` (skip → next candidate). This
+  mirrors `scrape_site._download_image`, which already decodes (`.convert(...)`)
+  inside its try and was never vulnerable. `img.load()` also closes a
+  **decompression-bomb** vector the byte cap can't: a tiny file whose pixels
+  expand past PIL's `MAX_IMAGE_PIXELS` now fails closed here, not deep in
+  detection — consistent with the project's untrusted-URL threat model.
+- **Tests (+4):** `_download` returns None on a truncated body / a non-image 200 /
+  a pixel-array bomb; plus a stage-level `TestFindPhotoResilience` proving
+  `find_photo` skips a corrupt candidate and returns the next good one (the
+  detector mock touches pixels, so it would crash without the fix).
+
 ### 2026-06-18T12:07Z — Autopitch find_voice: fix gender-inverting library-voice match
 
 Maintenance pass on the library-voice fallback. Repo green at 228 tests (was 210).
@@ -177,6 +202,21 @@ clawed-command.
 the user to have ChatGPT logged in in Chrome and API keys in `.env`.
 
 ## Key Findings
+
+### Autopitch — decode third-party images eagerly, inside the download guard
+`Image.open(BytesIO(data))` is lazy: it parses the header but defers pixel
+decoding. So a `try/except` around `Image.open` alone does **not** protect against
+a truncated/corrupt body — that raises `OSError: image file is truncated` (and a
+small-file/huge-pixels image raises `DecompressionBombError`) only when the pixels
+are first touched, which can be far from the fetch and outside any guard. Every
+autopitch image fetch targets an untrusted URL, so force the decode where you can
+still fail closed: call `img.load()` (or `.convert(...)`) inside the *same*
+try/except as the fetch and return None on failure. `find_photo._download` now
+does this (`img.load()`); `scrape_site._download_image` already did (it
+`.convert("RGBA")`s inside its try). This pairs with the byte cap — the cap bounds
+the *file size*, `load()` bounds the *pixel array* and rejects undecodable bytes.
+Any new image fetch must follow suit; returning a lazy handle hands the caller a
+bomb. (Pairs with the capped-download invariant in the finding below.)
 
 ### Autopitch — match demographic hints as whole words, and prefer ElevenLabs `labels`
 `find_voice.pick_library_voice` biases the library-voice pick by gender/region/age.

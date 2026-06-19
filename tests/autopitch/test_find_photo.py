@@ -30,6 +30,13 @@ def _png_bytes(size=(48, 48)) -> bytes:
     return buf.getvalue()
 
 
+def _truncated_png_bytes(size=(300, 300)) -> bytes:
+    """A valid PNG cut in half — Image.open succeeds (lazy) but the pixel
+    decode raises OSError('image file is truncated')."""
+    full = _png_bytes(size)
+    return full[: len(full) // 2]
+
+
 class TestDetectBestFace:
     def test_returns_none_for_solid_color(self):
         """A plain gray square clearly has no face."""
@@ -174,3 +181,57 @@ class TestDownloadCandidate:
 
         monkeypatch.setattr(find_photo, "fetch_bytes", over_cap)
         assert _download("http://x/huge.jpg") is None
+
+    def test_returns_none_on_truncated_image(self, monkeypatch):
+        """A corrupt/partial body opens lazily but fails to decode; _download must
+        force the decode and return None, not hand back a lazy bomb that explodes
+        later in _detect_best_face (outside any guard) and kills the whole loop."""
+        monkeypatch.setattr(find_photo, "fetch_bytes",
+                            lambda url, **kw: _truncated_png_bytes())
+        assert _download("http://x/partial.jpg") is None
+
+    def test_returns_none_on_non_image_body(self, monkeypatch):
+        """An error page served with HTTP 200 (not an image) is skipped, not fatal."""
+        monkeypatch.setattr(find_photo, "fetch_bytes",
+                            lambda url, **kw: b"<html>404 not found</html>")
+        assert _download("http://x/oops.jpg") is None
+
+    def test_returns_none_on_decompression_bomb(self, monkeypatch):
+        """A tiny file whose pixels expand past PIL's bomb guard is rejected here,
+        not deep in detection — the byte cap alone can't catch a pixel-array bomb."""
+        monkeypatch.setattr(find_photo, "fetch_bytes",
+                            lambda url, **kw: _png_bytes((300, 300)))
+        monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 100)  # auto-restored by monkeypatch
+        assert _download("http://x/bomb.png") is None
+
+
+class TestFindPhotoResilience:
+    """find_photo iterates arbitrary third-party search hits; one undecodable
+    image must not abort the stage when good candidates remain."""
+
+    def test_skips_corrupt_candidate_and_picks_good_one(self, monkeypatch, tmp_path):
+        bodies = {
+            "http://bad/x.jpg": _truncated_png_bytes((600, 600)),
+            "http://good/y.jpg": _png_bytes((600, 600)),
+        }
+        monkeypatch.setattr(find_photo, "fetch_bytes", lambda url, **kw: bodies[url])
+        monkeypatch.setattr(
+            find_photo, "_query_bing",
+            lambda name, company, key, count: [
+                find_photo.Candidate("http://bad/x.jpg", 600, 600, "bing"),
+                find_photo.Candidate("http://good/y.jpg", 600, 600, "bing"),
+            ],
+        )
+
+        # A detector that actually touches pixels, like the real one — so without
+        # the _download decode guard the corrupt candidate would crash right here.
+        def detect_reading_pixels(img):
+            np.asarray(img.convert("RGB"))
+            return (0.9, 0.3)
+
+        monkeypatch.setattr(find_photo, "_detect_best_face", detect_reading_pixels)
+
+        result = find_photo.find_photo("Jane Doe", "Acme", tmp_path, bing_key="k")
+        assert result is not None
+        assert result.source_url == "http://good/y.jpg"
+        assert result.saved_path.exists()
